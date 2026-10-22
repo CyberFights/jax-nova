@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Syntax check every module
+        run: npm run check
+      - name: Unit + HTTP smoke tests
+        run: npm test
+
+  docker:
+    name: build & boot the production image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: jax-nova:ci
+      - name: Boot it like Railway does
+        run: |
+          docker run -d --name jax -p 8787:8787 \
+            -e JAX_ACCESS_CODE=ci-only-code \
+            jax-nova:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8787/api/health > /tmp/health.json; then break; fi
+            sleep 1
+          done
+          echo "--- health ---"; cat /tmp/health.json; echo
+          # a protected deployment must not hand out a session without the code
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8787/api/capabilities)
+          test "$code" = "200"
+          locked=$(curl -s http://localhost:8787/api/capabilities | grep -o '"locked":true')
+          test -n "$locked"
+          unauth=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8787/api/chat \
+            -H 'content-type: application/json' -d '{"text":"hey jax"}')
+          test "$unauth" = "401"
+          echo "protected deployment behaves correctly"
+      - name: Container logs
+        if: always()
+        run: docker logs jax || true
+      - name: Tear down
+        if: always()
+        run: docker rm -f jax || true
