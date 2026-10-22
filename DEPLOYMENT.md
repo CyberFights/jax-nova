@@ -20,7 +20,7 @@ git init
 git add .
 git commit -m "Jax Nova: holographic voice assistant"
 git branch -M main
-git remote add origin https://github.com/YOUR-USERNAME/jax-nova.git
+git remote add origin https://github.com/CyberFights/jax-nova.git
 git push -u origin main
 ```
 
