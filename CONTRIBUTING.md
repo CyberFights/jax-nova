@@ -6,7 +6,7 @@ framework, no build step, no dependencies.
 ## Getting set up
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/jax-nova.git
+git clone https://github.com/CyberFights/jax-nova.git
 cd jax-nova
 node server/server.js       # http://localhost:8787
 npm test                    # must stay green
