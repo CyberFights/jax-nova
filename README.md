@@ -126,6 +126,39 @@ Nothing ever leaves you with a dead screen: if every image provider is rate-limi
 
 ---
 
+## Clone a voice from an audio file
+
+Yes — Jax can speak in a voice cloned from a recording, via ElevenLabs
+[Instant Voice Cloning](https://elevenlabs.io/docs/eleven-creative/voices/voice-cloning/instant-voice-cloning):
+
+1. Set `ELEVENLABS_API_KEY` (`.env` locally, or your host's variables). Cloning
+   needs a plan that includes Instant Voice Cloning (Starter or above); the
+   browser's built-in voices can't be cloned.
+2. Prepare **1–2 minutes of clean, single-speaker audio** — no music, reverb
+   or background noise; MP3 at 192 kbps+ is ideal. Recording quality matters
+   more than length.
+3. In the HUD open **CONFIG → Clone a voice from audio**: name the voice,
+   choose the file, tick the consent box (only clone your own voice, or one
+   you have the speaker's permission to clone), and hit **CLONE VOICE**. With
+   *Make it Jax's main voice* ticked, Jax switches to the clone immediately
+   and introduces itself in it.
+4. To keep it across restarts/redeploys, pin it in the environment — the
+   CONFIG panel shows the exact line after a successful clone:
+   `ELEVENLABS_VOICE_ID=<cloned-voice-id>`
+
+Already cloned a voice in the ElevenLabs app instead? No code needed: it
+appears in the CONFIG voice list (badged `· clone`) as soon as the key is set —
+pick it there, or pin its id with `ELEVENLABS_VOICE_ID`.
+
+The sample is forwarded to ElevenLabs by the server and never written to
+disk; the endpoint sits behind the access-code gate and is heavily
+rate-limited because each clone spends a voice slot on your account. Set
+`JAX_VOICE_CLONE=false` on a deployment where other people hold the access
+code. ElevenLabs may hold a new clone for **voice verification** — finish
+that under Voices at elevenlabs.io, then select the voice in CONFIG.
+
+---
+
 ## Wrestle-ai bridge
 
 Jax can hand its conversation to [CyberFights/Wrestle-ai](https://github.com/CyberFights/Wrestle-ai),
@@ -218,6 +251,7 @@ spend Mistral tokens and write to the memory store.
 ## What it can do
 
 **Voice & interface**
+- **Voice cloning** — clone a voice from an audio file and make it Jax's main voice (CONFIG → *Clone a voice from audio*; ElevenLabs Instant Voice Cloning, see [below](#clone-a-voice-from-an-audio-file))
 - Always-on wake word (“Hey Jax”, “Jax”, “Nova” — configurable in CONFIG)
 - Barge-in: click the reactor or press `Space` to interrupt speech
 - Push-to-talk (`M`), typed commands, `/slash` commands
@@ -373,7 +407,8 @@ Found a problem? See [SECURITY.md](SECURITY.md).
 | `JAX_WAKE_WORD` | `hey jax` | Default wake phrase |
 | `JAX_LOCATION` | `Richmond Hill, Ontario` | Fallback weather location |
 | `JAX_UNITS` | `metric` | `imperial` for °F / mph |
-| `ELEVENLABS_VOICE_ID` | auto | Pin a specific voice |
+| `ELEVENLABS_VOICE_ID` | auto | Pin a specific voice (e.g. a clone) as the permanent main voice |
+| `JAX_VOICE_CLONE` | `true` | Allow cloning voices from audio uploads in CONFIG |
 | `JAX_MAX_TOOL_ROUNDS` | `4` | Claude tool-call depth per turn |
 | `JAX_IMAGE_GEN` / `JAX_VIDEO_GEN` | `true` | Disable media skills |
 | `JAX_ACCESS_CODE` | *(unset)* | Require a code to use the API (set this when hosting) |

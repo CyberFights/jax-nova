@@ -28,6 +28,7 @@ Anthropic call. Two consequences:
 | Path traversal guard | `/generated/*` and static paths are resolved and confirmed inside their roots. |
 | Secret isolation | ElevenLabs is proxied server-side; the capability report only says whether a key exists. |
 | Payload caps | JSON bodies are limited to 8 MB, audio uploads to 25 MB. |
+| Voice cloning | `/api/tts/voices/clone` sits behind the same access gate, requires an explicit own-voice/permission attestation, charges 10× against the rate-limit budget (each clone spends an ElevenLabs voice slot), and can be switched off with `JAX_VOICE_CLONE=false` — recommended when anyone besides the owner holds the access code. Samples are forwarded to ElevenLabs and never stored on the server. |
 | XSS hygiene | HUD cards are built with DOM APIs and `textContent`; external content is never injected as HTML. |
 
 ## Known limitations

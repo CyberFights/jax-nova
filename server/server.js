@@ -246,7 +246,8 @@ async function sendFile(req, res, full, cacheControl) {
 
 /* ---------------------------------------------------------------- elevenlabs */
 
-const EL_BASE = 'https://api.elevenlabs.io/v1';
+// Overridable for regional ElevenLabs endpoints — and for offline tests.
+const EL_BASE = (process.env.ELEVENLABS_BASE_URL || 'https://api.elevenlabs.io/v1').replace(/\/+$/, '');
 const DEFAULT_VOICE = process.env.ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJgB'; // "Adam" — warm, neutral
 let cachedVoiceId = config.eleven.voiceId || null;
 
@@ -288,6 +289,30 @@ async function elevenTTS(text, { voiceId, model } = {}) {
     throw new Error(`ElevenLabs TTS ${res.status}: ${err.slice(0, 240)}`);
   }
   return Buffer.from(await res.arrayBuffer());
+}
+
+/**
+ * Instant Voice Cloning: turn one audio sample into a reusable voice_id.
+ * The sample is forwarded to ElevenLabs and never written to disk here.
+ * Returns { voice_id, requires_verification } — a voice that still requires
+ * verification cannot speak until the owner finishes ElevenLabs' voice
+ * captcha, so the caller must surface that instead of selecting it blindly.
+ */
+async function elevenCloneVoice(buffer, { name, filename = 'sample.mp3', mimetype = 'audio/mpeg', removeBackgroundNoise = false } = {}) {
+  const form = new FormData();
+  form.append('name', name);
+  form.append('files', new Blob([buffer], { type: mimetype }), filename);
+  form.append('remove_background_noise', removeBackgroundNoise ? 'true' : 'false');
+  form.append('description', 'Cloned from an uploaded sample in Jax Nova');
+  const res = await fetch(`${EL_BASE}/voices/add`, {
+    method: 'POST',
+    headers: { 'xi-api-key': config.eleven.key, accept: 'application/json' },
+    body: form,
+  });
+  if (!res.ok) throw new Error(`ElevenLabs voice clone ${res.status}: ${(await res.text()).slice(0, 240)}`);
+  const data = await res.json();
+  if (!data?.voice_id) throw new Error('ElevenLabs voice clone: no voice_id in response');
+  return { voice_id: data.voice_id, requires_verification: Boolean(data.requires_verification) };
 }
 
 async function elevenSTT(buffer, filename = 'speech.webm', mimetype = 'audio/webm') {
@@ -522,6 +547,72 @@ async function handleApi(req, res, pathname, url) {
     }
   }
 
+  // Clone a voice from an uploaded audio sample (ElevenLabs Instant Voice
+  // Cloning). The body is raw audio like /api/stt; metadata rides the query
+  // string so the server stays free of a multipart parser:
+  //   POST /api/tts/voices/clone?name=Jax&filename=sample.mp3&consent=1
+  //        &remove_background_noise=0&default=1      (body: the audio file)
+  // `default=1` makes the clone the server-wide main voice until restart;
+  // pin ELEVENLABS_VOICE_ID=<voice_id> in the environment to keep it.
+  if (pathname === '/api/tts/voices/clone' && method === 'POST') {
+    // a clone consumes a voice slot, so charge it heavily against the budget
+    const rl = checkRate(ip, 10);
+    if (!rl.ok) return sendJson(res, 429, { error: 'rate limited', retryAfter: rl.retryAfter }, { 'Retry-After': String(rl.retryAfter) });
+    if (!config.eleven.key) return sendJson(res, 501, { error: 'elevenlabs-not-configured' });
+    if (!config.features.voiceClone) {
+      return sendJson(res, 403, { error: 'voice cloning is disabled on this deployment (JAX_VOICE_CLONE=false)' });
+    }
+    const consent = (url.searchParams.get('consent') || '').toLowerCase();
+    if (consent !== '1' && consent !== 'true') {
+      return sendJson(res, 400, {
+        error: 'consent required — only clone your own voice, or one you have the speaker’s permission to clone',
+      });
+    }
+    const name = String(url.searchParams.get('name') || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 80);
+    if (!name) return sendJson(res, 400, { error: 'a name for the cloned voice is required' });
+
+    const type = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    let filename = path.basename(String(url.searchParams.get('filename') || '')).replace(/[^\w.\- ]+/g, '').trim();
+    const AUDIO_EXT = ['.mp3', '.wav', '.m4a', '.ogg', '.webm', '.flac', '.aac', '.mp4'];
+    if (!AUDIO_EXT.some((ext) => filename.toLowerCase().endsWith(ext))) {
+      const byType = { 'audio/mpeg': '.mp3', 'audio/mp3': '.mp3', 'audio/wav': '.wav', 'audio/x-wav': '.wav', 'audio/mp4': '.m4a', 'audio/x-m4a': '.m4a', 'audio/ogg': '.ogg', 'audio/webm': '.webm', 'audio/flac': '.flac', 'audio/aac': '.aac' };
+      if (byType[type]) filename = `sample${byType[type]}`;
+      else if (filename) return sendJson(res, 400, { error: `unsupported audio file “${filename}” — use MP3, WAV, M4A, OGG, WebM or FLAC` });
+      else return sendJson(res, 400, { error: 'unsupported audio type — upload an MP3, WAV, M4A, OGG, WebM or FLAC file' });
+    }
+
+    const buf = await readBody(req, 25 * 1024 * 1024);
+    // ~10 s of compressed speech is well over this; anything smaller is a stub
+    if (buf.length < 10_000) {
+      return sendJson(res, 400, { error: 'audio too short — upload at least a minute of clear, single-speaker speech' });
+    }
+    try {
+      const clone = await elevenCloneVoice(buf, {
+        name,
+        filename,
+        mimetype: type || 'audio/mpeg',
+        removeBackgroundNoise: ['1', 'true'].includes((url.searchParams.get('remove_background_noise') || '').toLowerCase()),
+      });
+      const makeDefault = ['1', 'true'].includes((url.searchParams.get('default') ?? '1').toLowerCase());
+      // only usable voices become the main voice — an unverified clone would
+      // make every TTS call fail and silently drop Jax to the browser voice
+      if (makeDefault && !clone.requires_verification) cachedVoiceId = clone.voice_id;
+      log(`voice cloned · “${name}” → ${clone.voice_id}${clone.requires_verification ? ' (verification pending)' : ''}`);
+      return sendJson(res, 200, {
+        ok: true,
+        id: clone.voice_id,
+        voice_id: clone.voice_id,
+        name,
+        requires_verification: clone.requires_verification,
+        selected: cachedVoiceId,
+        pin: `ELEVENLABS_VOICE_ID=${clone.voice_id}`,
+      });
+    } catch (err) {
+      log('voice clone error:', err.message);
+      return sendJson(res, 502, { error: err.message });
+    }
+  }
+
   if (pathname === '/api/tts/voices') {
     if (!config.eleven.key) return sendJson(res, 200, { voices: [], selected: null });
     try {
@@ -531,6 +622,8 @@ async function handleApi(req, res, pathname, url) {
         voices: (data.voices || []).map((v) => ({
           id: v.voice_id,
           name: v.name,
+          // premade | cloned | generated | professional — the HUD badges clones
+          category: v.category || null,
           labels: v.labels,
           preview: v.preview_url,
         })),

@@ -112,6 +112,8 @@ GitHub-connected flow — correct for a repo without a published template.
 | `JAX_TRUST_PROXY` | `true` | Trust `X-Forwarded-For` for per-IP limits behind Railway's proxy. |
 | `ANTHROPIC_API_KEY` | — | Claude tool-use brain. |
 | `ELEVENLABS_API_KEY` | — | Neural voice + transcription. |
+| `ELEVENLABS_VOICE_ID` | auto | Pin a specific voice — set to a cloned voice's id to make it the permanent main voice. A clone made in CONFIG is the main voice immediately, but only until the next restart/redeploy without this. |
+| `JAX_VOICE_CLONE` | `true` | Allow cloning voices from audio uploads in CONFIG. Set `false` if anyone besides you holds the access code (each clone spends an ElevenLabs voice slot). |
 | `OPENAI_API_KEY` | — | OpenAI-compatible brain and image generation. |
 | `JAX_BRAIN` | `auto` | Force `claude`, `openai`, `free`, `claude-cli`, or `wrestle`. |
 | `WRESTLE_AI_URL` | `https://wrestle-ai-production.up.railway.app` | Wrestle-ai deployment backing `/wrestling_chat`. |

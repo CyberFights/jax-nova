@@ -626,3 +626,119 @@ test('server: without an access code the name still selects a memory', async () 
     await stub.close();
   }
 });
+
+/* ──────────────────────────────────────────────── voice cloning (stubbed) */
+
+/** A stand-in for the ElevenLabs voices API that records raw request bodies. */
+async function startStubEleven(handler) {
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (d) => chunks.push(d));
+    req.on('end', () => {
+      const entry = { method: req.method, url: req.url, headers: req.headers, body: Buffer.concat(chunks).toString('latin1') };
+      seen.push(entry);
+      handler(req, res, entry);
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  return {
+    url: `http://127.0.0.1:${server.address().port}`,
+    seen,
+    close: () => new Promise((r) => server.close(r)),
+  };
+}
+
+test('server: voice cloning proxies the sample and makes it the main voice', async () => {
+  const stub = await startStubEleven((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (req.url === '/v1/voices/add') {
+      return res.end(JSON.stringify({ voice_id: 'clone-voice-123', requires_verification: false }));
+    }
+    return res.end(
+      JSON.stringify({
+        voices: [{ voice_id: 'clone-voice-123', name: 'Jax Clone', category: 'cloned', labels: {}, preview_url: null }],
+      }),
+    );
+  });
+  const srv = await startServer({
+    ELEVENLABS_API_KEY: 'test-key-not-real',
+    ELEVENLABS_BASE_URL: `${stub.url}/v1`,
+  });
+  try {
+    const caps = await (await fetch(`${srv.base}/api/capabilities`)).json();
+    assert.equal(caps.voice.elevenlabs, true);
+    assert.equal(caps.voice.clone, true);
+
+    const sample = Buffer.alloc(20_000, 0x61);
+    const clone = (query, body = sample) =>
+      fetch(`${srv.base}/api/tts/voices/clone?${query}`, {
+        method: 'POST',
+        headers: { 'content-type': 'audio/mpeg' },
+        body,
+      });
+
+    // no consent → refused before anything reaches ElevenLabs
+    const noConsent = await clone('name=Jax+Clone&filename=sample.mp3');
+    assert.equal(noConsent.status, 400);
+    assert.match((await noConsent.json()).error, /consent/i);
+    assert.equal(stub.seen.length, 0);
+
+    // a stub of audio → refused before anything reaches ElevenLabs
+    const tooShort = await clone('name=Jax+Clone&filename=sample.mp3&consent=1', Buffer.from('tiny'));
+    assert.equal(tooShort.status, 400);
+    assert.match((await tooShort.json()).error, /too short/i);
+    assert.equal(stub.seen.length, 0);
+
+    // a real clone request is forwarded as multipart with name + sample
+    const ok = await clone('name=Jax+Clone&filename=sample.mp3&consent=1&default=1');
+    assert.equal(ok.status, 200);
+    const payload = await ok.json();
+    assert.equal(payload.voice_id, 'clone-voice-123');
+    assert.equal(payload.requires_verification, false);
+    assert.equal(payload.pin, 'ELEVENLABS_VOICE_ID=clone-voice-123');
+
+    const sent = stub.seen.at(-1);
+    assert.equal(sent.method, 'POST');
+    assert.equal(sent.url, '/v1/voices/add');
+    assert.equal(sent.headers['xi-api-key'], 'test-key-not-real');
+    assert.ok(sent.body.includes('name="files"; filename="sample.mp3"'), 'sample rides the files field');
+    assert.ok(sent.body.includes('Jax Clone'), 'voice name is forwarded');
+
+    // default=1 made it the server-wide main voice, badged as a clone
+    const voices = await (await fetch(`${srv.base}/api/tts/voices`)).json();
+    assert.equal(voices.selected, 'clone-voice-123');
+    assert.equal(voices.voices[0].category, 'cloned');
+  } finally {
+    await stopServer(srv);
+    await stub.close();
+  }
+});
+
+test('server: voice cloning needs a key and can be disabled per deployment', async () => {
+  const sample = Buffer.alloc(20_000, 0x61);
+  const attempt = (base) =>
+    fetch(`${base}/api/tts/voices/clone?name=X&filename=s.mp3&consent=1`, {
+      method: 'POST',
+      headers: { 'content-type': 'audio/mpeg' },
+      body: sample,
+    });
+
+  const keyless = await startServer({ ELEVENLABS_API_KEY: '' });
+  try {
+    const caps = await (await fetch(`${keyless.base}/api/capabilities`)).json();
+    assert.equal(caps.voice.clone, false);
+    assert.equal((await attempt(keyless.base)).status, 501);
+  } finally {
+    await stopServer(keyless);
+  }
+
+  const disabled = await startServer({ ELEVENLABS_API_KEY: 'test-key-not-real', JAX_VOICE_CLONE: 'false' });
+  try {
+    const caps = await (await fetch(`${disabled.base}/api/capabilities`)).json();
+    assert.equal(caps.voice.clone, false);
+    assert.equal((await attempt(disabled.base)).status, 403);
+  } finally {
+    await stopServer(disabled);
+  }
+});

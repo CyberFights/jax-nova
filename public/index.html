@@ -262,6 +262,20 @@
       <small id="voiceHint">Browser voices are used unless an ElevenLabs key is present.</small>
     </div>
 
+    <div class="field" id="cloneField">
+      <label>Clone a voice from audio</label>
+      <input id="cloneName" type="text" placeholder="Voice name — e.g. Jax (my voice)" maxlength="80" />
+      <input id="cloneFile" type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg,.webm,.flac" />
+      <label class="check-row"><input id="cloneDenoise" type="checkbox" /> Remove background noise from the sample</label>
+      <label class="check-row"><input id="cloneDefault" type="checkbox" checked /> Make it Jax&rsquo;s main voice</label>
+      <label class="check-row"><input id="cloneConsent" type="checkbox" /> This is my voice, or I have the speaker&rsquo;s permission to clone it</label>
+      <div class="drawer-actions">
+        <button class="hud-btn" id="btnCloneVoice" type="button">CLONE VOICE</button>
+      </div>
+      <small id="cloneHint">Upload 1&ndash;2 minutes of clean, single-speaker audio (MP3 at 192&nbsp;kbps+ is ideal, max 25&nbsp;MB). Needs an ElevenLabs plan with Instant Voice Cloning. The sample is sent to ElevenLabs &mdash; nothing is stored on this server.</small>
+      <small id="cloneStatus" role="status" aria-live="polite"></small>
+    </div>
+
     <div class="field two">
       <div><label>Speech rate</label><input id="setRate" type="range" min="0.6" max="1.4" step="0.05" value="1" /></div>
       <div><label>Pitch</label><input id="setPitch" type="range" min="0.5" max="1.5" step="0.05" value="0.95" /></div>

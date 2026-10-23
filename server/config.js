@@ -117,6 +117,9 @@ export const config = {
     imageGen: bool('JAX_IMAGE_GEN', true),
     videoGen: bool('JAX_VIDEO_GEN', true),
     webSearch: bool('JAX_WEB_SEARCH', true),
+    // Cloning spends a voice slot on the owner's ElevenLabs account, so a
+    // shared deployment can switch it off while keeping TTS/STT available.
+    voiceClone: bool('JAX_VOICE_CLONE', true),
   },
 };
 
@@ -143,6 +146,9 @@ export function capabilities() {
       model: config.eleven.key ? config.eleven.model : null,
       voiceId: config.eleven.voiceId || null,
       sttModel: config.eleven.key ? config.eleven.sttModel : null,
+      // Instant Voice Cloning from an uploaded sample (needs a key + a
+      // cloning-capable ElevenLabs plan; the plan check happens upstream)
+      clone: Boolean(config.eleven.key && config.features.voiceClone),
     },
     brain: {
       provider: config.brain.provider,

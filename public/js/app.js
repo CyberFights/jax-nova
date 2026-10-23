@@ -589,7 +589,10 @@ async function populateVoices() {
     try {
       const res = await fetch('/api/tts/voices');
       const data = await res.json();
-      elVoices = (data.voices || []).map((v) => ({ label: `${v.name}${v.labels?.accent ? ` · ${v.labels.accent}` : ''}`, value: `el:${v.id}` }));
+      elVoices = (data.voices || []).map((v) => ({
+        label: `${v.name}${v.category === 'cloned' || v.category === 'professional' ? ' · clone' : ''}${v.labels?.accent ? ` · ${v.labels.accent}` : ''}`,
+        value: `el:${v.id}`,
+      }));
       app.elDefaultVoice = data.selected;
     } catch {
       /* ignore */
@@ -613,6 +616,110 @@ async function populateVoices() {
   $('#voiceHint').textContent = app.caps?.voice?.elevenlabs
     ? 'ElevenLabs is active — speech synthesis and Scribe transcription are proxied through the local server.'
     : 'Browser voices active. Add ELEVENLABS_API_KEY to .env for a much more natural voice.';
+  updateCloneAvailability();
+}
+
+/* ─────────────────────────────────────────────────────────── voice cloning */
+
+function updateCloneAvailability() {
+  const btn = $('#btnCloneVoice');
+  const hint = $('#cloneHint');
+  if (!btn || !hint) return;
+  const voice = app.caps?.voice || {};
+  if (!voice.elevenlabs) {
+    btn.disabled = true;
+    hint.textContent =
+      'Voice cloning needs ELEVENLABS_API_KEY in .env, on a plan with Instant Voice Cloning (Starter or above). Browser voices cannot be cloned.';
+  } else if (voice.clone === false) {
+    btn.disabled = true;
+    hint.textContent =
+      'Voice cloning is disabled on this deployment (JAX_VOICE_CLONE=false). Voices already cloned on the account can still be picked above.';
+  } else {
+    btn.disabled = false;
+    hint.textContent =
+      'Upload 1–2 minutes of clean, single-speaker audio (MP3 at 192 kbps+ is ideal, max 25 MB). Needs an ElevenLabs plan with Instant Voice Cloning. The sample is sent to ElevenLabs — nothing is stored on this server.';
+  }
+}
+
+/** Send the chosen sample to the clone proxy, then (optionally) go live with it. */
+async function cloneVoiceFromSample() {
+  const btn = $('#btnCloneVoice');
+  const status = $('#cloneStatus');
+  const setStatus = (msg) => {
+    if (status) status.textContent = msg;
+  };
+  const file = $('#cloneFile')?.files?.[0];
+  if (!file) {
+    setStatus('Pick an audio file first — 1–2 minutes of clear speech works best.');
+    hud.toast('Choose an audio sample to clone', 'warn');
+    return;
+  }
+  if (!$('#cloneConsent')?.checked) {
+    setStatus('Confirm this is your voice (or you have the speaker’s permission) before cloning.');
+    hud.toast('Consent confirmation required', 'warn');
+    return;
+  }
+  if (file.size > 25 * 1024 * 1024) {
+    setStatus('That file is over 25 MB — trim it to 1–2 minutes and try again.');
+    return;
+  }
+  const name =
+    $('#cloneName')?.value.trim() ||
+    file.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim() ||
+    'Jax Clone';
+  const makeDefault = Boolean($('#cloneDefault')?.checked);
+  const params = new URLSearchParams({
+    name,
+    filename: file.name,
+    consent: '1',
+    remove_background_noise: $('#cloneDenoise')?.checked ? '1' : '0',
+    default: makeDefault ? '1' : '0',
+  });
+
+  if (btn) btn.disabled = true;
+  setStatus(`Uploading “${file.name}” and cloning “${name}”…`);
+  try {
+    const res = await fetch(`/api/tts/voices/clone?${params}`, {
+      method: 'POST',
+      headers: { 'content-type': file.type || 'audio/mpeg' },
+      body: file,
+    });
+    if (res.status === 401) window.dispatchEvent(new Event('jax:locked'));
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `clone ${res.status}`);
+    hud.log(`voice clone · ${name} → ${data.voice_id}`);
+    await populateVoices();
+
+    if (data.requires_verification) {
+      setStatus(
+        `Clone created (${data.voice_id}), but ElevenLabs needs voice verification before it can speak. Finish it under Voices at elevenlabs.io, then choose “${name}” above — or pin ${data.pin} in .env to make it permanent.`,
+      );
+      hud.toast('Clone created — verification pending in ElevenLabs', 'warn');
+      return;
+    }
+    if (makeDefault) {
+      talker.voiceId = data.voice_id;
+      talker.elevenlabs = true;
+      store.set('voiceId', data.voice_id);
+      const select = $('#setVoice');
+      if (select) select.value = `el:${data.voice_id}`;
+      setStatus(
+        `“${name}” is now Jax’s main voice (${data.voice_id}). To keep it after a restart or redeploy, set ${data.pin} in .env or your host’s variables.`,
+      );
+      hud.toast('Cloned voice active');
+      if (settings.speak && !app.muted) talker.speak('Voice clone online. This is how I sound now.');
+    } else {
+      setStatus(`“${name}” cloned (${data.voice_id}) and added to the voice list above. Pin ${data.pin} in .env to make it the server default.`);
+      hud.toast('Voice cloned');
+    }
+  } catch (err) {
+    setStatus(`Clone failed: ${err.message}`);
+    hud.log(`voice clone · ${err.message}`, 'err');
+    hud.toast('Voice clone failed — see CONFIG for details', 'warn');
+  } finally {
+    if (btn) btn.disabled = false;
+    updateCloneAvailability();
+  }
 }
 
 /* ────────────────────────────────────────────────────────── access lock */
@@ -830,6 +937,7 @@ function bindControls() {
     hud.toast('Voice updated');
   });
   if (store.get('voiceId', null)) talker.voiceId = store.get('voiceId');
+  $('#btnCloneVoice')?.addEventListener('click', cloneVoiceFromSample);
 
   const rateInput = $('#setRate');
   const pitchInput = $('#setPitch');

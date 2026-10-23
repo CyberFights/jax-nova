@@ -577,6 +577,23 @@ body.listening .mic-btn { background: rgba(var(--acc2-rgb), 0.2); border-color: 
 }
 .field input[type="text"]:focus { border-color: var(--acc); box-shadow: 0 0 16px rgba(var(--acc-rgb), 0.18); }
 .field input[type="range"] { accent-color: var(--acc); }
+.field input[type="file"] {
+  background: rgba(var(--acc-rgb), 0.05); border: 1px solid var(--line-soft); color: var(--ink-dim);
+  padding: 7px 9px; border-radius: 2px; font-family: var(--mono); font-size: 10px; outline: none; width: 100%;
+}
+.field input[type="file"]:focus { border-color: var(--acc); }
+.field input[type="file"]::file-selector-button {
+  background: transparent; border: 1px solid var(--line-soft); color: var(--ink-dim); border-radius: 2px;
+  font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em; padding: 4px 8px; margin-right: 9px; cursor: pointer;
+}
+.field label.check-row {
+  display: flex; align-items: flex-start; gap: 8px; cursor: pointer;
+  font-family: inherit; font-size: 10.5px; letter-spacing: 0; text-transform: none; color: var(--ink-dim); line-height: 1.45;
+}
+.field label.check-row input[type="checkbox"] { accent-color: var(--acc); margin-top: 1px; flex-shrink: 0; }
+.field input:disabled, .field .hud-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+#cloneStatus:empty { display: none; }
+#cloneStatus { color: var(--acc2, var(--acc)); overflow-wrap: anywhere; }
 .toggle-row { flex-direction: row; align-items: center; justify-content: space-between; gap: 14px; }
 .toggle-row > div { display: flex; flex-direction: column; gap: 3px; }
 .field > label + small { margin-top: -2px; }
