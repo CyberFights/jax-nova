@@ -100,6 +100,151 @@ GitHub-connected flow — correct for a repo without a published template.
 
 ---
 
+## Free voice on Railway (Voicebox/VoiceStudio as a second service)
+
+You can run the free local voice stack **inside Railway**, next to Jax:
+deploy [Voicebox](https://github.com/jamiepine/voicebox) or
+[VoiceStudio](https://github.com/debpalash/VoiceStudio) as a second service
+in the **same project and environment**, give it **no public domain**, and
+point Jax at it over [Railway private networking](https://docs.railway.com/private-networking):
+
+```
+Browser ──https──► Jax (public domain, access code)
+                     │  http over private network (WireGuard, never public)
+                     ▼
+               voicebox.railway.internal:17493      (or voicestudio…:3900)
+                     │
+               attached volume: profiles + models
+```
+
+Every service gets a `<service-name>.railway.internal` DNS name that only
+sibling services in the same project/environment can resolve — browsers and
+the internet cannot reach it. That matters: the voice APIs have no (Voicebox)
+or optional (VoiceStudio) auth, so the private network *is* the firewall.
+Jax stays the only public door, behind `JAX_ACCESS_CODE`.
+
+> **Read this first — the honest costs.** Railway has **no GPUs**, so the
+> voice service runs on CPU, and Railway bills RAM/CPU **by usage**
+> ([pricing](https://railway.com/pricing)). The *software* is free; the
+> always-on container isn't: a model held in 8 GB of RAM around the clock is
+> roughly $80/month at the published per-GB-second rate, before CPU. Pick a
+> small CPU engine (below) and watch the service's Metrics tab for a day
+> before deciding this beats an ElevenLabs Starter plan — or the same apps
+> running free on a PC you already own. App sleeping can cut the idle bill,
+> but then the first reply after idle waits for a wake + model reload.
+
+### Option A — VoiceStudio (easiest: prebuilt image)
+
+1. In your Jax project: **+ New → Docker Image** →
+   `ghcr.io/debpalash/voicestudio:stable` ([official image](https://github.com/debpalash/VoiceStudio/blob/main/docs/install/docker.md)).
+   Name the service **`voicestudio`**.
+2. **Variables** on the *voicestudio* service:
+
+   | Variable | Value |
+   | --- | --- |
+   | `OMNIVOICE_API_KEY` | a long random string (required in server mode; Jax will present it) |
+   | `OMNIVOICE_SERVER_MODE` | `1` (the image default) |
+   | `OMNIVOICE_PORT` | `3900` |
+   | `OMNIVOICE_DATA_DIR` | `/app/omnivoice_data` |
+   | `HF_HOME` | `/app/omnivoice_data/huggingface` |
+
+3. **Volume:** attach one mounted at `/app/omnivoice_data` (10 GB+ — first
+   boot downloads ~2.4 GB of weights for the default engine; profiles and
+   settings live there too).
+4. **Resources:** give it at least ~4 vCPU / 8 GB RAM to start. **No public
+   domain.** (If you later want its web UI, generate a domain targeting port
+   3900 temporarily — the API key protects it — and delete it when done.)
+5. **Variables** on the *Jax* service:
+
+   ```bash
+   JAX_LOCAL_VOICE_URL=http://${{voicestudio.RAILWAY_PRIVATE_DOMAIN}}:3900
+   JAX_LOCAL_VOICE_KIND=voicestudio
+   JAX_LOCAL_VOICE_KEY=<the same OMNIVOICE_API_KEY>
+   ```
+
+   (`${{…RAILWAY_PRIVATE_DOMAIN}}` is a Railway reference variable — it
+   tracks the service if you rename things. `http://voicestudio.railway.internal:3900`
+   works too.)
+
+### Option B — Voicebox (build from source)
+
+Voicebox has no prebuilt image yet; Railway builds its own Dockerfile
+(CPU variant, web UI included, ~3–4 GB image — first build takes minutes).
+
+1. **Fork** [jamiepine/voicebox](https://github.com/jamiepine/voicebox) to
+   your GitHub account (Railway's GitHub app needs access to the repo).
+2. In your Jax project: **+ New → GitHub Repo** → your fork. Name it
+   **`voicebox`**.
+3. **Settings → Deploy → Custom Start Command** (binds dual-stack so private
+   networking works in legacy IPv6-only environments too; upstream's default
+   `0.0.0.0` only covers IPv4):
+
+   ```bash
+   uvicorn backend.main:app --host :: --port 17493
+   ```
+
+4. **Volume:** attach one mounted at `/app/data` (10 GB+), and set on the
+   *voicebox* service so models share that single volume (Railway gives a
+   service one mount point that matters here):
+
+   | Variable | Value |
+   | --- | --- |
+   | `HF_HOME` | `/app/data/huggingface` |
+   | `VOICEBOX_MODELS_DIR` | `/app/data/models` |
+   | `NUMBA_CACHE_DIR` | `/tmp/numba_cache` |
+   | `LOG_LEVEL` | `info` |
+
+5. **Resources:** upstream's floor is 4 CPU / 8 GB RAM for one engine. More
+   vCPU = proportionally faster speech. **No public domain — yet:**
+6. **One-time model download.** The OpenAI-compatible endpoint needs models
+   downloaded first. Temporarily **Generate Domain** (target port `17493`),
+   open the Voicebox web UI, and in **Models** download **LuxTTS** (the fast
+   CPU cloning engine) and a **Whisper** model (for transcription/sample
+   transcripts). Then **delete the public domain** — Voicebox's API has *no
+   authentication*, so never leave it reachable.
+7. **Variables** on the *Jax* service:
+
+   ```bash
+   JAX_LOCAL_VOICE_URL=http://${{voicebox.RAILWAY_PRIVATE_DOMAIN}}:17493
+   JAX_LOCAL_VOICE_KIND=voicebox
+   JAX_LOCAL_VOICE_MODEL=luxtts
+   ```
+
+### Verify, clone, pin
+
+1. Redeploy Jax. Its deploy log banner should read
+   `Voice out  Voicebox (local) · http://voicebox.railway.internal:17493`
+   and `/api/health` reports `"voice": "local"`.
+2. Open the HUD → **CONFIG**. The voice list should show the voice service's
+   profiles. If it can't be reached, the hint under the list now prints the
+   exact upstream error (unreachable / wrong port / model missing) — start
+   there, then compare both services' logs at the same timestamp.
+3. Ask Jax something short. The first reply loads the model (slow); later
+   replies reuse it.
+4. Clone your voice in **CONFIG → Clone a voice from audio** (the sample
+   travels browser → Jax → private network → voice service; it is stored on
+   the voice service's volume, as that app's profile). Then set the printed
+   pin — `JAX_LOCAL_VOICE_ID=<profile>` — on the Jax service so the clone
+   survives restarts as the permanent main voice.
+
+### Engine choices on Railway CPUs
+
+| Engine | App | Clones? | On Railway CPU |
+| --- | --- | --- | --- |
+| **LuxTTS** | Voicebox | ✅ English | **Start here** — built for CPU speed (~1 GB footprint) |
+| Chatterbox Turbo | Voicebox | ✅ English | Workable; 350M, expect a few seconds per sentence |
+| Qwen3-TTS 0.6B | Voicebox | ✅ 10 langs | Slow but usable for short replies; 1.7B — avoid |
+| Kokoro | Voicebox | ❌ presets | Fastest of all if you don't need *your* voice |
+| OmniVoice (default) | VoiceStudio | ✅ 646 langs | Test it; heavier — watch RAM/CPU metrics |
+| MOSS-TTS-Nano, KittenTTS | VoiceStudio | nano ✅ / kitten ❌ | The light options in that app |
+
+While testing big engines, raise `JAX_LOCAL_VOICE_TIMEOUT_MS` (e.g.
+`300000`) on Jax so a slow first generation isn't cut off, and turn **app
+sleeping off** for the voice service unless you accept a long first reply
+after idle.
+
+---
+
 ## Environment variables
 
 | Variable | Default | Notes |
@@ -115,7 +260,7 @@ GitHub-connected flow — correct for a repo without a published template.
 | `ELEVENLABS_VOICE_ID` | auto | Pin a specific voice — set to a cloned voice's id to make it the permanent main voice. A clone made in CONFIG is the main voice immediately, but only until the next restart/redeploy without this. |
 | `JAX_VOICE_CLONE` | `true` | Allow cloning voices from audio uploads in CONFIG. Set `false` if anyone besides you holds the access code (each clone spends an ElevenLabs voice slot). |
 | `JAX_VOICE_PROVIDER` | `auto` | Voice order local → ElevenLabs → browser; force one with `local`/`elevenlabs`/`browser`. |
-| `JAX_LOCAL_VOICE_URL` | — | Free local voice app base URL — Voicebox `http://127.0.0.1:17493`, VoiceStudio `http://127.0.0.1:3900`. **Home deployments only:** the Jax server must reach this address, so on Railway `127.0.0.1` is the container, not your PC. Run Jax on the same machine as the voice app (or point this at a LAN/Tailscale host running it) — see README. |
+| `JAX_LOCAL_VOICE_URL` | — | Free local voice app base URL — at home: Voicebox `http://127.0.0.1:17493`, VoiceStudio `http://127.0.0.1:3900`. On Railway, `127.0.0.1` is Jax's own container, **not** your PC: deploy the voice app as a second service in the same project and use its private address (`http://${{voicebox.RAILWAY_PRIVATE_DOMAIN}}:17493`) — see [Free voice on Railway](#free-voice-on-railway-voiceboxvoicestudio-as-a-second-service). |
 | `JAX_LOCAL_VOICE_ID` | app default | Pin a local voice profile (name or id). A clone made in CONFIG is the main voice immediately, but only until restart without this. |
 | `JAX_LOCAL_VOICE_MODEL` / `JAX_LOCAL_VOICE_STT_MODEL` | `tts-1` / `whisper-1` | Local engine ids (`tts-1` = the voice app's active engine). |
 | `JAX_LOCAL_VOICE_KEY` | — | Bearer key for a keyed remote VoiceStudio backend; loopback needs none. |
@@ -198,3 +343,9 @@ User=jax
 | Gallery empties after each deploy | No volume attached | Mount a volume at `/data` |
 | `/api/health` shows `"storage": "read-only"` | Volume permissions or a full disk | Check the mount at `/data`; the entrypoint should have chowned it |
 | First request after idle is slow | App sleeping is enabled | Disable sleeping, or accept the cold start |
+| CONFIG says “Voicebox/VoiceStudio unreachable” | Voice service down, wrong private hostname/port, different environment, or not listening on `::` | Same project **and environment**; URL is `http://<service>.railway.internal:<17493 or 3900>`; Voicebox start command binds `--host ::`; check the voice service's logs |
+| `model_not_downloaded` in Jax logs / CONFIG hint | Engine model not fetched yet | Voicebox: open its web UI once (temporary domain) → Models → download the engine + Whisper, then delete the domain. VoiceStudio: wait for first-boot downloads in its logs |
+| Replies take 10s+ per sentence | Big engine on Railway CPU (no GPUs on Railway) | Switch to LuxTTS (`JAX_LOCAL_VOICE_MODEL=luxtts`) or another small engine, add vCPU, keep replies short |
+| Voice service keeps restarting / OOM | Model + runtime exceed its RAM | Raise the service's memory, or use a smaller engine; 8 GB is the realistic floor |
+| Clones/profiles vanish after a redeploy | Voice service has no volume (or models cached outside it) | Voicebox: volume at `/app/data` + `HF_HOME=/app/data/huggingface`. VoiceStudio: volume at `/app/omnivoice_data` |
+| First spoken reply times out, later ones fine | Model load on first generation | Raise `JAX_LOCAL_VOICE_TIMEOUT_MS` (e.g. `300000`); disable app sleeping on the voice service |

@@ -588,6 +588,7 @@ async function populateVoices() {
   const voice = app.caps?.voice || {};
   let serverVoices = [];
   let serverLoaded = false;
+  let serverError = '';
   if (voice.server) {
     try {
       const res = await fetch('/api/tts/voices');
@@ -598,8 +599,11 @@ async function populateVoices() {
       }));
       app.elDefaultVoice = data.selected;
       serverLoaded = res.ok;
+      // keep the upstream reason ("Voicebox unreachable at …") — it is the
+      // first thing you need when private networking or the app is down
+      if (!res.ok) serverError = data.error || `voices ${res.status}`;
     } catch {
-      /* ignore — server voice app may simply be closed */
+      serverError = 'could not reach the Jax server';
     }
   }
   const browserVoices = (window.speechSynthesis?.getVoices() || [])
@@ -626,11 +630,13 @@ async function populateVoices() {
   } else {
     select.value = `local:${localStorage.getItem('jax.voiceName') || talker.browserVoice?.name || ''}`;
   }
-  $('#voiceHint').textContent = voice.local
-    ? `${voice.label} is active — speech is synthesized on your own machine, free. Keep the voice app running; the first reply may take a while as its model loads.`
-    : voice.server
-      ? 'ElevenLabs is active — speech synthesis and Scribe transcription are proxied through the local server.'
-      : 'Browser voices active. For a free local voice run Voicebox or VoiceStudio and set JAX_LOCAL_VOICE_URL — or add ELEVENLABS_API_KEY for the cloud voice.';
+  $('#voiceHint').textContent = serverError
+    ? `${voice.label || 'Server voice'} unreachable: ${serverError}. Jax will use the browser voice until it answers — check the voice service is running and JAX_LOCAL_VOICE_URL points at it (same Railway project/environment for *.railway.internal).`
+    : voice.local
+      ? `${voice.label} is active — speech is synthesized by your own voice server, free. Keep it running; the first reply may take a while as its model loads.`
+      : voice.server
+        ? 'ElevenLabs is active — speech synthesis and Scribe transcription are proxied through the local server.'
+        : 'Browser voices active. For a free local voice run Voicebox or VoiceStudio and set JAX_LOCAL_VOICE_URL — or add ELEVENLABS_API_KEY for the cloud voice.';
   updateCloneAvailability();
 }
 

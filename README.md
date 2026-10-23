@@ -166,8 +166,13 @@ a GPU or Apple Silicon is comfortable, CPU works with the small/fast engines
 but can be slower than real time — expect the first reply to take a while
 while the model loads), and the **Jax server must be able to reach the app**
 — so run Jax on the same machine (or LAN/Tailscale host) as Voicebox or
-VoiceStudio. A Jax deployed on Railway can't see your laptop's `127.0.0.1`
-(the sample also never leaves your machine, which is the point). App licence
+VoiceStudio. A Jax deployed on Railway can't see your laptop's `127.0.0.1` —
+but you can deploy the voice app as a **second service in the same Railway
+project** and let Jax reach it over the private network instead
+(`http://voicebox.railway.internal:17493`); the full walkthrough, including
+the CPU/cost reality check, is in
+[DEPLOYMENT.md](DEPLOYMENT.md#free-voice-on-railway-voiceboxvoicestudio-as-a-second-service).
+At home the sample never leaves your machine, which is the point. App licence
 ≠ model licence: each engine's weights carry their own terms (some
 non-commercial), so check before commercial use.
 

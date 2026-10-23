@@ -349,6 +349,9 @@ async function handleApi(req, res, pathname, url) {
       uptime: Math.round(process.uptime()),
       node: process.version,
       brain: capabilities().brain.provider,
+      // which voice stack answers /api/tts — handy when debugging a
+      // same-project voice service over Railway private networking
+      voice: capabilities().voice.provider,
       locked: Boolean(config.accessCode),
       // a Railway volume that arrived root-owned shows up here immediately
       storage: (await storageWritable()) ? 'writable' : 'read-only',

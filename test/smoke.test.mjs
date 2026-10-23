@@ -775,6 +775,7 @@ test('server: Voicebox drives TTS, STT, voices and free cloning over its APIs', 
     const caps = await (await fetch(`${srv.base}/api/capabilities`)).json();
     assert.equal(caps.voice.provider, 'local');
     assert.equal(caps.voice.label, 'Voicebox (local)');
+    assert.equal((await (await fetch(`${srv.base}/api/health`)).json()).voice, 'local');
     assert.equal(caps.voice.server, true);
     assert.equal(caps.voice.stt, true);
     assert.equal(caps.voice.clone, true);
