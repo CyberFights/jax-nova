@@ -125,7 +125,10 @@ const PREFERRED_VOICES = [
 
 export class Talker {
   constructor(opts = {}) {
-    this.elevenlabs = Boolean(opts.elevenlabs);
+    // server = speak via /api/tts (ElevenLabs, or a free local Voicebox /
+    // VoiceStudio) instead of the browser's speechSynthesis
+    this.server = Boolean(opts.server ?? opts.elevenlabs);
+    this.engineName = opts.engineName || 'server';
     this.voiceId = opts.voiceId || null;
     this.rate = opts.rate ?? 1;
     this.pitch = opts.pitch ?? 0.95;
@@ -180,7 +183,7 @@ export class Talker {
   }
 
   get engine() {
-    return this.elevenlabs ? 'ElevenLabs' : this.synth ? 'browser' : 'none';
+    return this.server ? this.engineName : this.synth ? 'browser' : 'none';
   }
 
   async ensureAudioCtx() {
@@ -218,22 +221,25 @@ export class Talker {
     this.playing = true;
     this.onState('speaking');
 
+    // a server-voice failure (cloud hiccup, local model still loading…) drops
+    // THIS reply to the browser voice, but the next reply tries the server
+    // again — a local engine that was warming up shouldn't mute itself forever
+    let browserFallback = false;
     while (job.index < job.chunks.length && job.gen === this.generation && !this.stopRequested) {
       const chunk = job.chunks[job.index];
       // start fetching the next chunk while this one speaks
       const next = job.chunks[job.index + 1];
-      const prefetch = this.elevenlabs && next ? this.fetchSpeech(next) : null;
+      const prefetch = this.server && !browserFallback && next ? this.fetchSpeech(next) : null;
 
       try {
-        await this.speakChunk(chunk);
+        await this.speakChunk(chunk, { forceBrowser: browserFallback });
       } catch (err) {
         console.warn('[jax] tts chunk failed:', err.message);
         this.onError(err.message);
-        // fall back to browser voice for the rest of this job
-        if (this.elevenlabs) {
-          this.elevenlabs = false;
+        if (this.server && !browserFallback) {
+          browserFallback = true;
           try {
-            await this.speakChunk(chunk);
+            await this.speakChunk(chunk, { forceBrowser: true });
           } catch { /* give up on this chunk */ }
         }
       }
@@ -264,13 +270,21 @@ export class Talker {
       window.dispatchEvent(new Event('jax:locked'));
       throw new Error('locked');
     }
-    if (!res.ok) throw new Error(`tts ${res.status}`);
+    if (!res.ok) {
+      // surface the server's reason (e.g. local model not downloaded yet)
+      const detail = await res.json().then((d) => d?.error).catch(() => '');
+      throw new Error(detail || `tts ${res.status}`);
+    }
     return res.blob();
   }
 
-  async speakChunk(text) {
+  async speakChunk(text, { forceBrowser = false } = {}) {
     if (this.stopRequested) return;
-    if (this.elevenlabs) {
+    if (forceBrowser && this._prefetched) {
+      URL.revokeObjectURL(this._prefetched);
+      this._prefetched = null;
+    }
+    if (this.server && !forceBrowser) {
       let url = this._prefetched;
       this._prefetched = null;
       try {
@@ -628,7 +642,7 @@ export class Listener {
 
   /**
    * Push-to-talk fallback path: record N ms with MediaRecorder and transcribe
-   * server-side via ElevenLabs Scribe.
+   * server-side (ElevenLabs Scribe, or a local Whisper via Voicebox/VoiceStudio).
    */
   async transcribeClip(ms = 6000, onTick) {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error('recording unavailable');

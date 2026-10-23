@@ -38,6 +38,39 @@ const anthropicKey = env('ANTHROPIC_API_KEY');
 const openaiKey = env('OPENAI_API_KEY');
 
 /**
+ * Local voice server: any OpenAI-compatible speech endpoint running on the
+ * user's own machine/LAN — Voicebox (http://127.0.0.1:17493), VoiceStudio
+ * (http://127.0.0.1:3900), Speaches, LocalAI… Both named apps answer
+ * POST /v1/audio/speech, so one integration drives either, for free.
+ * The "kind" only changes voice listing / clone creation / STT route shape,
+ * where the two apps' native APIs differ; auto-detects from the default ports.
+ */
+const localVoiceUrl = env('JAX_LOCAL_VOICE_URL');
+function pickLocalKind(url) {
+  const forced = env('JAX_LOCAL_VOICE_KIND', 'auto').toLowerCase();
+  if (['voicebox', 'voicestudio', 'openai'].includes(forced)) return forced;
+  try {
+    const u = new URL(url);
+    if (u.port === '17493') return 'voicebox';
+    if (u.port === '3900') return 'voicestudio';
+  } catch {
+    /* unparseable URL — the first request will fail loudly enough */
+  }
+  return 'openai';
+}
+
+/** Voice provider: JAX_VOICE_PROVIDER wins, else local → elevenlabs → browser. */
+function pickVoiceProvider() {
+  const hasLocal = Boolean(localVoiceUrl);
+  const hasEleven = Boolean(elevenKey);
+  const forced = env('JAX_VOICE_PROVIDER', 'auto').toLowerCase();
+  if (forced === 'browser') return 'browser';
+  if (forced === 'local' && hasLocal) return 'local';
+  if (forced === 'elevenlabs' && hasEleven) return 'elevenlabs';
+  return hasLocal ? 'local' : hasEleven ? 'elevenlabs' : 'browser';
+}
+
+/**
  * Brain selection:
  *   auto        → Claude if a key/CLI exists, else the free keyless brain
  *   claude      → Anthropic API  |  claude-cli → local `claude` binary
@@ -81,6 +114,25 @@ export const config = {
     model: env('ELEVENLABS_MODEL', 'eleven_turbo_v2_5'),
     sttModel: env('ELEVENLABS_STT_MODEL', 'scribe_v2'),
   },
+
+  // Free, local voice (Voicebox / VoiceStudio / any OpenAI-compatible speech
+  // server). The Jax *server* must be able to reach this URL — run Jax on the
+  // same machine as the voice app, or point this at a LAN/Tailscale host. A
+  // Jax on Railway cannot reach your laptop's 127.0.0.1.
+  localVoice: {
+    url: localVoiceUrl,
+    kind: localVoiceUrl ? pickLocalKind(localVoiceUrl) : '',
+    // Bearer key for a keyed remote backend (VoiceStudio's OMNIVOICE_API_KEY).
+    // Loopback needs none; Voicebox ignores the header entirely.
+    key: env('JAX_LOCAL_VOICE_KEY'),
+    model: env('JAX_LOCAL_VOICE_MODEL', 'tts-1'),
+    sttModel: env('JAX_LOCAL_VOICE_STT_MODEL', 'whisper-1'),
+    // Profile name or id to pin as the main voice (blank = the app's default)
+    voiceId: env('JAX_LOCAL_VOICE_ID'),
+    // First generation may load a multi-GB model — be patient by default.
+    timeoutMs: Number(env('JAX_LOCAL_VOICE_TIMEOUT_MS', '180000')),
+  },
+  voiceProvider: pickVoiceProvider(),
 
   brain: {
     provider: pickBrain(),
@@ -141,15 +193,42 @@ export function capabilities() {
     location: config.assistant.location,
     units: config.assistant.units,
     ownerName: config.assistant.ownerName,
-    voice: {
-      elevenlabs: Boolean(config.eleven.key),
-      model: config.eleven.key ? config.eleven.model : null,
-      voiceId: config.eleven.voiceId || null,
-      sttModel: config.eleven.key ? config.eleven.sttModel : null,
-      // Instant Voice Cloning from an uploaded sample (needs a key + a
-      // cloning-capable ElevenLabs plan; the plan check happens upstream)
-      clone: Boolean(config.eleven.key && config.features.voiceClone),
-    },
+    voice: (() => {
+      const provider = config.voiceProvider;
+      const local = provider === 'local';
+      const eleven = provider === 'elevenlabs';
+      const kind = local ? config.localVoice.kind : null;
+      return {
+        provider,
+        label: local
+          ? kind === 'voicebox'
+            ? 'Voicebox (local)'
+            : kind === 'voicestudio'
+              ? 'VoiceStudio (local)'
+              : 'Local voice server'
+          : eleven
+            ? 'ElevenLabs'
+            : 'Browser',
+        // the browser talks to /api/tts whenever a server-side voice exists
+        server: provider !== 'browser',
+        elevenlabs: Boolean(config.eleven.key),
+        local,
+        localKind: kind,
+        model: local ? config.localVoice.model : eleven ? config.eleven.model : null,
+        voiceId: local ? config.localVoice.voiceId || null : eleven ? config.eleven.voiceId || null : null,
+        // server-side transcription: local Whisper or ElevenLabs Scribe
+        stt: provider !== 'browser',
+        sttLabel: local ? 'Whisper (local)' : eleven ? 'Scribe' : null,
+        sttModel: local ? config.localVoice.sttModel : eleven ? config.eleven.sttModel : null,
+        // Clone from an uploaded sample: ElevenLabs IVC (paid plan) or a
+        // local Voicebox/VoiceStudio profile (free). Generic OpenAI speech
+        // servers have no clone API — profiles are made in their own apps.
+        clone: Boolean(
+          config.features.voiceClone &&
+            (eleven || (local && (kind === 'voicebox' || kind === 'voicestudio'))),
+        ),
+      };
+    })(),
     brain: {
       provider: config.brain.provider,
       model:

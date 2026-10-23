@@ -13,6 +13,7 @@ import { config, capabilities, lockedCapabilities, ROOT } from './config.js';
 import { storageWritable } from './media.js';
 import { wrestleChat, wrestleHealth, wrestleConfig, stripStageDirections } from './wrestle.js';
 import { respond, sanitizeForSpeech } from './brain.js';
+import { localTTS, localSTT, localVoices, localCloneVoice } from './localvoice.js';
 import { runSkill, skills } from './skills.js';
 import { splitSentences } from './util.js';
 import os from 'node:os';
@@ -250,6 +251,8 @@ async function sendFile(req, res, full, cacheControl) {
 const EL_BASE = (process.env.ELEVENLABS_BASE_URL || 'https://api.elevenlabs.io/v1').replace(/\/+$/, '');
 const DEFAULT_VOICE = process.env.ELEVENLABS_VOICE_ID || 'pNInz6obpgDQGcFmaJgB'; // "Adam" — warm, neutral
 let cachedVoiceId = config.eleven.voiceId || null;
+// Local provider's runtime main voice (profile name/id); JAX_LOCAL_VOICE_ID pins it
+let cachedLocalVoiceId = config.localVoice.voiceId || null;
 
 async function resolveVoiceId() {
   if (cachedVoiceId) return cachedVoiceId;
@@ -530,11 +533,22 @@ async function handleApi(req, res, pathname, url) {
   if (pathname === '/api/tts' && method === 'POST') {
     const rl = checkRate(ip, 1);
     if (!rl.ok) return sendJson(res, 429, { error: 'rate limited', retryAfter: rl.retryAfter }, { 'Retry-After': String(rl.retryAfter) });
-    if (!config.eleven.key) return sendJson(res, 501, { error: 'elevenlabs-not-configured' });
+    if (config.voiceProvider === 'browser') return sendJson(res, 501, { error: 'no-server-voice-configured' });
     const body = await readJson(req);
     const text = sanitizeForSpeech(body.text || '').slice(0, 2500);
     if (!text) return sendJson(res, 400, { error: 'empty text' });
     try {
+      if (config.voiceProvider === 'local') {
+        const { audio, contentType } = await localTTS(text, {
+          voiceId: body.voiceId || cachedLocalVoiceId || undefined,
+          model: body.model,
+        });
+        return send(res, 200, audio, {
+          'Content-Type': contentType,
+          'Content-Length': audio.length,
+          'X-Voice-Engine': `local-${config.localVoice.kind}`,
+        });
+      }
       const audio = await elevenTTS(text, { voiceId: body.voiceId, model: body.model });
       return send(res, 200, audio, {
         'Content-Type': 'audio/mpeg',
@@ -547,18 +561,25 @@ async function handleApi(req, res, pathname, url) {
     }
   }
 
-  // Clone a voice from an uploaded audio sample (ElevenLabs Instant Voice
-  // Cloning). The body is raw audio like /api/stt; metadata rides the query
-  // string so the server stays free of a multipart parser:
+  // Clone a voice from an uploaded audio sample — ElevenLabs Instant Voice
+  // Cloning, or a free local profile in Voicebox/VoiceStudio. The body is raw
+  // audio like /api/stt; metadata rides the query string so the server stays
+  // free of a multipart parser:
   //   POST /api/tts/voices/clone?name=Jax&filename=sample.mp3&consent=1
-  //        &remove_background_noise=0&default=1      (body: the audio file)
+  //        &transcript=<sample words>&default=1      (body: the audio file)
   // `default=1` makes the clone the server-wide main voice until restart;
-  // pin ELEVENLABS_VOICE_ID=<voice_id> in the environment to keep it.
+  // pin it in the environment (see the `pin` field) to keep it.
   if (pathname === '/api/tts/voices/clone' && method === 'POST') {
     // a clone consumes a voice slot, so charge it heavily against the budget
     const rl = checkRate(ip, 10);
     if (!rl.ok) return sendJson(res, 429, { error: 'rate limited', retryAfter: rl.retryAfter }, { 'Retry-After': String(rl.retryAfter) });
-    if (!config.eleven.key) return sendJson(res, 501, { error: 'elevenlabs-not-configured' });
+    const capsVoice = capabilities().voice;
+    if (config.voiceProvider === 'browser') return sendJson(res, 501, { error: 'no-server-voice-configured' });
+    if (config.voiceProvider === 'local' && !capsVoice.clone && config.features.voiceClone) {
+      return sendJson(res, 501, {
+        error: 'this local voice server has no clone API Jax can call — create the voice in Voicebox/VoiceStudio, then pick it in CONFIG',
+      });
+    }
     if (!config.features.voiceClone) {
       return sendJson(res, 403, { error: 'voice cloning is disabled on this deployment (JAX_VOICE_CLONE=false)' });
     }
@@ -582,30 +603,48 @@ async function handleApi(req, res, pathname, url) {
     }
 
     const buf = await readBody(req, 25 * 1024 * 1024);
-    // ~10 s of compressed speech is well over this; anything smaller is a stub
+    // a few seconds of compressed speech is well over this; smaller is a stub
     if (buf.length < 10_000) {
-      return sendJson(res, 400, { error: 'audio too short — upload at least a minute of clear, single-speaker speech' });
+      return sendJson(res, 400, {
+        error:
+          config.voiceProvider === 'local'
+            ? 'audio too short — upload a clear clip of a few seconds of single-speaker speech (3–30s is ideal locally)'
+            : 'audio too short — upload at least a minute of clear, single-speaker speech',
+      });
     }
     try {
-      const clone = await elevenCloneVoice(buf, {
-        name,
-        filename,
-        mimetype: type || 'audio/mpeg',
-        removeBackgroundNoise: ['1', 'true'].includes((url.searchParams.get('remove_background_noise') || '').toLowerCase()),
-      });
+      const isLocal = config.voiceProvider === 'local';
+      const clone = isLocal
+        ? await localCloneVoice(buf, {
+            name,
+            filename,
+            mimetype: type || 'audio/mpeg',
+            // local zero-shot engines clone from audio + its transcript
+            referenceText: String(url.searchParams.get('transcript') || '').trim().slice(0, 2000),
+          })
+        : await elevenCloneVoice(buf, {
+            name,
+            filename,
+            mimetype: type || 'audio/mpeg',
+            removeBackgroundNoise: ['1', 'true'].includes((url.searchParams.get('remove_background_noise') || '').toLowerCase()),
+          });
       const makeDefault = ['1', 'true'].includes((url.searchParams.get('default') ?? '1').toLowerCase());
-      // only usable voices become the main voice — an unverified clone would
-      // make every TTS call fail and silently drop Jax to the browser voice
-      if (makeDefault && !clone.requires_verification) cachedVoiceId = clone.voice_id;
-      log(`voice cloned · “${name}” → ${clone.voice_id}${clone.requires_verification ? ' (verification pending)' : ''}`);
+      // only usable voices become the main voice — an unverified ElevenLabs
+      // clone would make every TTS call fail and drop Jax to the browser voice
+      if (makeDefault && !clone.requires_verification) {
+        if (isLocal) cachedLocalVoiceId = clone.voice_id;
+        else cachedVoiceId = clone.voice_id;
+      }
+      log(`voice cloned (${isLocal ? `local-${config.localVoice.kind}` : 'elevenlabs'}) · “${name}” → ${clone.voice_id}${clone.requires_verification ? ' (verification pending)' : ''}`);
       return sendJson(res, 200, {
         ok: true,
         id: clone.voice_id,
         voice_id: clone.voice_id,
         name,
+        provider: config.voiceProvider,
         requires_verification: clone.requires_verification,
-        selected: cachedVoiceId,
-        pin: `ELEVENLABS_VOICE_ID=${clone.voice_id}`,
+        selected: isLocal ? cachedLocalVoiceId : cachedVoiceId,
+        pin: isLocal ? `JAX_LOCAL_VOICE_ID=${clone.voice_id}` : `ELEVENLABS_VOICE_ID=${clone.voice_id}`,
       });
     } catch (err) {
       log('voice clone error:', err.message);
@@ -614,6 +653,13 @@ async function handleApi(req, res, pathname, url) {
   }
 
   if (pathname === '/api/tts/voices') {
+    if (config.voiceProvider === 'local') {
+      try {
+        return sendJson(res, 200, { voices: await localVoices(), selected: cachedLocalVoiceId });
+      } catch (err) {
+        return sendJson(res, 502, { error: err.message });
+      }
+    }
     if (!config.eleven.key) return sendJson(res, 200, { voices: [], selected: null });
     try {
       const r = await fetch(`${EL_BASE}/voices`, { headers: { 'xi-api-key': config.eleven.key } });
@@ -637,12 +683,16 @@ async function handleApi(req, res, pathname, url) {
   if (pathname === '/api/stt' && method === 'POST') {
     const rl = checkRate(ip, 1);
     if (!rl.ok) return sendJson(res, 429, { error: 'rate limited', retryAfter: rl.retryAfter }, { 'Retry-After': String(rl.retryAfter) });
-    if (!config.eleven.key) return sendJson(res, 501, { error: 'elevenlabs-not-configured' });
+    if (config.voiceProvider === 'browser') return sendJson(res, 501, { error: 'no-server-voice-configured' });
     const buf = await readBody(req, 25 * 1024 * 1024);
     if (buf.length < 1200) return sendJson(res, 400, { error: 'audio too short' });
     const type = req.headers['content-type'] || 'audio/webm';
     try {
-      const text = await elevenSTT(buf, type.includes('wav') ? 'speech.wav' : 'speech.webm', type.split(';')[0]);
+      const filename = type.includes('wav') ? 'speech.wav' : type.includes('mp4') ? 'speech.mp4' : 'speech.webm';
+      const text =
+        config.voiceProvider === 'local'
+          ? await localSTT(buf, filename, type.split(';')[0])
+          : await elevenSTT(buf, filename === 'speech.mp4' ? 'speech.webm' : filename, type.split(';')[0]);
       return sendJson(res, 200, { text });
     } catch (err) {
       log('stt error:', err.message);
@@ -707,15 +757,17 @@ server.listen(config.port, config.host, () => {
   console.log(`\x1b[36m${bar}\x1b[0m`);
   console.log(`  HUD        http://localhost:${config.port}`);
   console.log(`  Brain      ${caps.brain.provider}  (${caps.brain.model})`);
-  console.log(`  Voice out  ${caps.voice.elevenlabs ? 'ElevenLabs' : 'browser speech synthesis'}`);
-  console.log(`  Voice in   ${caps.voice.elevenlabs ? 'ElevenLabs Scribe' : 'browser SpeechRecognition'}`);
+  console.log(`  Voice out  ${caps.voice.server ? `${caps.voice.label}${caps.voice.local ? ` · ${config.localVoice.url}` : ''}` : 'browser speech synthesis'}`);
+  console.log(`  Voice in   ${caps.voice.stt ? `${caps.voice.sttLabel} (${caps.voice.sttModel})` : 'browser SpeechRecognition'}`);
   console.log(`  Wake word  "${caps.wakeWord}"`);
   console.log(`  Storage    ${config.generatedDir}`);
   console.log(`  Access     ${config.accessCode ? 'access code required' : 'open (no code set)'}`);
   console.log(`  Rate limit ${config.rateLimit ? `${config.rateLimit} req/min per IP` : 'off'}`);
   console.log(`  Folder     ${ROOT}`);
-  if (!caps.voice.elevenlabs) {
-    console.log(`\n  \x1b[33mTip:\x1b[0m add ELEVENLABS_API_KEY=... to .env for a natural voice.`);
+  if (!caps.voice.server) {
+    console.log(`\n  \x1b[33mTip:\x1b[0m free local voice: run Voicebox or VoiceStudio, then set`);
+    console.log(`       JAX_LOCAL_VOICE_URL=http://127.0.0.1:17493 (Voicebox) in .env —`);
+    console.log(`       or add ELEVENLABS_API_KEY=... for the cloud voice.`);
   }
   if (caps.brain.provider === 'free') {
     console.log(`  \x1b[33mTip:\x1b[0m running keyless. Add ANTHROPIC_API_KEY=... for Claude tool-use.`);

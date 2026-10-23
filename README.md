@@ -106,6 +106,7 @@ Or use the launcher, which checks your Node version and creates `.env` for you:
 
 | Variable | Effect | Without it |
 | --- | --- | --- |
+| `JAX_LOCAL_VOICE_URL` | **Free local voice** — cloned-voice TTS + Whisper transcription from Voicebox/VoiceStudio on your machine | Next voice provider down the ladder |
 | `ELEVENLABS_API_KEY` | Natural neural voice + **Scribe** transcription | Browser `speechSynthesis` + `SpeechRecognition` |
 | `ANTHROPIC_API_KEY` | Claude with native **tool use** — the best brain | Keyless fallback brain |
 | `JAX_USE_CLAUDE_CLI=true` | Use your local `claude` CLI login instead of an API key | — |
@@ -116,8 +117,8 @@ Everything degrades in a defined order:
 
 ```
 Brain   →  Claude (tools)  →  OpenAI  →  keyless text model  →  pattern-matched skills
-Voice   →  ElevenLabs TTS  →  browser speechSynthesis
-Transcription → ElevenLabs Scribe → browser SpeechRecognition
+Voice   →  Local (Voicebox/VoiceStudio)  →  ElevenLabs TTS  →  browser speechSynthesis
+Transcription → Local Whisper → ElevenLabs Scribe → browser SpeechRecognition
 Search  →  DuckDuckGo (via reader proxy) → Bing RSS → Wikipedia
 Images  →  FLUX.1-schnell (HF Space) → FLUX.1-dev → Pollinations → local SVG schematic
 ```
@@ -128,34 +129,66 @@ Nothing ever leaves you with a dead screen: if every image provider is rate-limi
 
 ## Clone a voice from an audio file
 
-Yes — Jax can speak in a voice cloned from a recording, via ElevenLabs
-[Instant Voice Cloning](https://elevenlabs.io/docs/eleven-creative/voices/voice-cloning/instant-voice-cloning):
+Jax can speak in a voice cloned from a recording — either **free and local**
+or via the ElevenLabs cloud. Either way it happens in **CONFIG → Clone a
+voice from audio**: name the voice, choose the file, tick the consent box
+(only clone your own voice, or one you have the speaker's permission to
+clone), and hit **CLONE VOICE**. With *Make it Jax's main voice* ticked, Jax
+switches immediately and introduces itself in the new voice. To keep it
+across restarts, pin it in the environment — the CONFIG panel prints the
+exact line (`JAX_LOCAL_VOICE_ID=…` or `ELEVENLABS_VOICE_ID=…`) after cloning.
 
-1. Set `ELEVENLABS_API_KEY` (`.env` locally, or your host's variables). Cloning
-   needs a plan that includes Instant Voice Cloning (Starter or above); the
-   browser's built-in voices can't be cloned.
-2. Prepare **1–2 minutes of clean, single-speaker audio** — no music, reverb
-   or background noise; MP3 at 192 kbps+ is ideal. Recording quality matters
-   more than length.
-3. In the HUD open **CONFIG → Clone a voice from audio**: name the voice,
-   choose the file, tick the consent box (only clone your own voice, or one
-   you have the speaker's permission to clone), and hit **CLONE VOICE**. With
-   *Make it Jax's main voice* ticked, Jax switches to the clone immediately
-   and introduces itself in it.
-4. To keep it across restarts/redeploys, pin it in the environment — the
-   CONFIG panel shows the exact line after a successful clone:
-   `ELEVENLABS_VOICE_ID=<cloned-voice-id>`
+### Free — on your own machine (Voicebox / VoiceStudio)
 
-Already cloned a voice in the ElevenLabs app instead? No code needed: it
-appears in the CONFIG voice list (badged `· clone`) as soon as the key is set —
-pick it there, or pin its id with `ELEVENLABS_VOICE_ID`.
+Two open-source desktop apps do the cloning locally, and both expose the
+same OpenAI-compatible speech API (`POST /v1/audio/speech`), so Jax drives
+either one with a single integration — cloned-voice TTS **and** Whisper
+transcription for push-to-talk, no key, no credits, fully offline:
 
-The sample is forwarded to ElevenLabs by the server and never written to
-disk; the endpoint sits behind the access-code gate and is heavily
-rate-limited because each clone spends a voice slot on your account. Set
-`JAX_VOICE_CLONE=false` on a deployment where other people hold the access
-code. ElevenLabs may hold a new clone for **voice verification** — finish
-that under Voices at elevenlabs.io, then select the voice in CONFIG.
+| App | Licence | Point Jax at | Engines inside |
+| --- | --- | --- | --- |
+| [Voicebox](https://github.com/jamiepine/voicebox) ([voicebox.sh](https://voicebox.sh)) | MIT | `JAX_LOCAL_VOICE_URL=http://127.0.0.1:17493` | Qwen3-TTS, LuxTTS, Chatterbox, TADA, Kokoro presets… |
+| [VoiceStudio](https://github.com/debpalash/VoiceStudio) ([voicestudio.sh](https://voicestudio.sh)) | AGPL-3.0 | `JAX_LOCAL_VOICE_URL=http://127.0.0.1:3900` | OmniVoice (default), VoxCPM2, CosyVoice… 646 languages |
+
+1. Install either app and let it download a TTS model (Voicebox → Models).
+   Keep the app running — its local API only listens while it's open.
+2. Add the `JAX_LOCAL_VOICE_URL` line above to `.env` and restart Jax. The
+   port auto-detects which app it is; any other OpenAI-compatible speech
+   server (Speaches, LocalAI…) also works for TTS/STT.
+3. Clone in CONFIG, or clone in the app itself — existing profiles appear in
+   the voice list badged `· clone` / `· preset`. Local zero-shot engines
+   clone from a **clean clip of a few seconds plus its transcript**; type
+   the transcript into the clone form for the best match (for Voicebox, Jax
+   Whisper-transcribes the sample for you if you leave it blank).
+
+The catches, honestly: it runs on **your** hardware (models are gigabytes;
+a GPU or Apple Silicon is comfortable, CPU works with the small/fast engines
+but can be slower than real time — expect the first reply to take a while
+while the model loads), and the **Jax server must be able to reach the app**
+— so run Jax on the same machine (or LAN/Tailscale host) as Voicebox or
+VoiceStudio. A Jax deployed on Railway can't see your laptop's `127.0.0.1`
+(the sample also never leaves your machine, which is the point). App licence
+≠ model licence: each engine's weights carry their own terms (some
+non-commercial), so check before commercial use.
+
+### Cloud — ElevenLabs
+
+Set `ELEVENLABS_API_KEY` (`.env` locally, or your host's variables) and Jax
+uses [Instant Voice Cloning](https://elevenlabs.io/docs/eleven-creative/voices/voice-cloning/instant-voice-cloning)
+instead (best when Jax itself is hosted, e.g. on Railway). Cloning needs a
+plan that includes Instant Voice Cloning (Starter or above); prepare **1–2
+minutes of clean, single-speaker audio** — no music, reverb or background
+noise; MP3 at 192 kbps+ is ideal. Voices you cloned in the ElevenLabs app
+also appear in the CONFIG list as soon as the key is set. Samples are
+forwarded to ElevenLabs and never written to disk here, and ElevenLabs may
+hold a new clone for **voice verification** — finish that under Voices at
+elevenlabs.io, then select the voice in CONFIG.
+
+Provider order is local → ElevenLabs → browser; force one with
+`JAX_VOICE_PROVIDER=local|elevenlabs|browser`. The clone endpoint sits behind
+the access-code gate and is heavily rate-limited because each clone spends a
+profile/voice slot with the provider. Set `JAX_VOICE_CLONE=false` on a
+deployment where other people hold the access code.
 
 ---
 
@@ -251,7 +284,7 @@ spend Mistral tokens and write to the memory store.
 ## What it can do
 
 **Voice & interface**
-- **Voice cloning** — clone a voice from an audio file and make it Jax's main voice (CONFIG → *Clone a voice from audio*; ElevenLabs Instant Voice Cloning, see [below](#clone-a-voice-from-an-audio-file))
+- **Voice cloning** — clone a voice from an audio file and make it Jax's main voice (CONFIG → *Clone a voice from audio*; free + local via Voicebox/VoiceStudio, or ElevenLabs — see [below](#clone-a-voice-from-an-audio-file))
 - Always-on wake word (“Hey Jax”, “Jax”, “Nova” — configurable in CONFIG)
 - Barge-in: click the reactor or press `Space` to interrupt speech
 - Push-to-talk (`M`), typed commands, `/slash` commands
@@ -308,7 +341,8 @@ jax-nova/
 ├── test/             unit + HTTP smoke tests (npm test, no network needed)
 ├── .github/workflows CI: tests on Node 20/22 + build & boot the image
 ├── server/
-│   ├── server.js     HTTP + static + ElevenLabs proxy (TTS/STT/voices)
+│   ├── server.js     HTTP + static + voice proxies (TTS/STT/voices/clone)
+│   ├── localvoice.js free local voice: Voicebox/VoiceStudio (OpenAI speech API)
 │   ├── brain.js      provider ladder, tool loop, sanitising for speech
 │   ├── router.js     instant deterministic commands
 │   ├── intents.js    high-confidence skill intents (no model)
@@ -407,6 +441,10 @@ Found a problem? See [SECURITY.md](SECURITY.md).
 | `JAX_WAKE_WORD` | `hey jax` | Default wake phrase |
 | `JAX_LOCATION` | `Richmond Hill, Ontario` | Fallback weather location |
 | `JAX_UNITS` | `metric` | `imperial` for °F / mph |
+| `JAX_VOICE_PROVIDER` | `auto` | Force `local`, `elevenlabs` or `browser` (auto = that order) |
+| `JAX_LOCAL_VOICE_URL` | — | Voicebox (`http://127.0.0.1:17493`) / VoiceStudio (`http://127.0.0.1:3900`) base URL |
+| `JAX_LOCAL_VOICE_ID` | app default | Pin a local voice profile (name or id) as the permanent main voice |
+| `JAX_LOCAL_VOICE_MODEL` | `tts-1` | Local TTS engine id (`tts-1` = the app's active engine) |
 | `ELEVENLABS_VOICE_ID` | auto | Pin a specific voice (e.g. a clone) as the permanent main voice |
 | `JAX_VOICE_CLONE` | `true` | Allow cloning voices from audio uploads in CONFIG |
 | `JAX_MAX_TOOL_ROUNDS` | `4` | Claude tool-call depth per turn |

@@ -114,6 +114,11 @@ GitHub-connected flow — correct for a repo without a published template.
 | `ELEVENLABS_API_KEY` | — | Neural voice + transcription. |
 | `ELEVENLABS_VOICE_ID` | auto | Pin a specific voice — set to a cloned voice's id to make it the permanent main voice. A clone made in CONFIG is the main voice immediately, but only until the next restart/redeploy without this. |
 | `JAX_VOICE_CLONE` | `true` | Allow cloning voices from audio uploads in CONFIG. Set `false` if anyone besides you holds the access code (each clone spends an ElevenLabs voice slot). |
+| `JAX_VOICE_PROVIDER` | `auto` | Voice order local → ElevenLabs → browser; force one with `local`/`elevenlabs`/`browser`. |
+| `JAX_LOCAL_VOICE_URL` | — | Free local voice app base URL — Voicebox `http://127.0.0.1:17493`, VoiceStudio `http://127.0.0.1:3900`. **Home deployments only:** the Jax server must reach this address, so on Railway `127.0.0.1` is the container, not your PC. Run Jax on the same machine as the voice app (or point this at a LAN/Tailscale host running it) — see README. |
+| `JAX_LOCAL_VOICE_ID` | app default | Pin a local voice profile (name or id). A clone made in CONFIG is the main voice immediately, but only until restart without this. |
+| `JAX_LOCAL_VOICE_MODEL` / `JAX_LOCAL_VOICE_STT_MODEL` | `tts-1` / `whisper-1` | Local engine ids (`tts-1` = the voice app's active engine). |
+| `JAX_LOCAL_VOICE_KEY` | — | Bearer key for a keyed remote VoiceStudio backend; loopback needs none. |
 | `OPENAI_API_KEY` | — | OpenAI-compatible brain and image generation. |
 | `JAX_BRAIN` | `auto` | Force `claude`, `openai`, `free`, `claude-cli`, or `wrestle`. |
 | `WRESTLE_AI_URL` | `https://wrestle-ai-production.up.railway.app` | Wrestle-ai deployment backing `/wrestling_chat`. |

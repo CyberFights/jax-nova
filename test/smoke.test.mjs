@@ -742,3 +742,200 @@ test('server: voice cloning needs a key and can be disabled per deployment', asy
     await stopServer(disabled);
   }
 });
+
+/* ───────────────────────────── local voice: Voicebox / VoiceStudio (stubbed) */
+
+test('server: Voicebox drives TTS, STT, voices and free cloning over its APIs', async () => {
+  const stub = await startStubEleven((req, res) => {
+    if (req.url === '/v1/audio/speech') {
+      res.writeHead(200, { 'content-type': 'audio/wav' });
+      return res.end('FAKEWAVBYTES');
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (req.url === '/profiles' && req.method === 'GET') {
+      return res.end(
+        JSON.stringify([
+          { id: 'prof-1', name: 'Morgan', voice_type: 'cloned', language: 'en' },
+          { id: 'prof-2', name: 'Alloy', voice_type: 'preset', language: 'en' },
+        ]),
+      );
+    }
+    if (req.url === '/transcribe') return res.end(JSON.stringify({ text: 'the exact words in the sample' }));
+    if (req.url === '/profiles' && req.method === 'POST') return res.end(JSON.stringify({ id: 'prof-9', name: 'Jax Clone' }));
+    if (req.url === '/profiles/prof-9/samples') return res.end(JSON.stringify({ id: 'sample-1' }));
+    return res.end(JSON.stringify({}));
+  });
+  const srv = await startServer({
+    ELEVENLABS_API_KEY: '',
+    JAX_LOCAL_VOICE_URL: stub.url,
+    JAX_LOCAL_VOICE_KIND: 'voicebox',
+    JAX_LOCAL_VOICE_ID: 'Morgan',
+  });
+  try {
+    const caps = await (await fetch(`${srv.base}/api/capabilities`)).json();
+    assert.equal(caps.voice.provider, 'local');
+    assert.equal(caps.voice.label, 'Voicebox (local)');
+    assert.equal(caps.voice.server, true);
+    assert.equal(caps.voice.stt, true);
+    assert.equal(caps.voice.clone, true);
+
+    // TTS goes to the OpenAI-compatible speech endpoint with the pinned voice
+    const tts = await fetch(`${srv.base}/api/tts`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'Hello there.' }),
+    });
+    assert.equal(tts.status, 200);
+    assert.match(tts.headers.get('content-type') || '', /wav/);
+    assert.equal(tts.headers.get('x-voice-engine'), 'local-voicebox');
+    assert.equal(await tts.text(), 'FAKEWAVBYTES');
+    const speech = stub.seen.find((s) => s.url === '/v1/audio/speech');
+    const sentSpeech = JSON.parse(speech.body);
+    assert.equal(sentSpeech.model, 'tts-1');
+    assert.equal(sentSpeech.voice, 'Morgan');
+    assert.equal(sentSpeech.input, 'Hello there.');
+    assert.equal(speech.headers['x-voicebox-client-id'], 'jax-nova');
+
+    // profiles are listed and badged with their type
+    const voices = await (await fetch(`${srv.base}/api/tts/voices`)).json();
+    assert.equal(voices.selected, 'Morgan');
+    assert.equal(voices.voices[0].category, 'cloned');
+    assert.equal(voices.voices[1].category, 'preset');
+
+    // push-to-talk transcription rides Voicebox's native /transcribe
+    const stt = await fetch(`${srv.base}/api/stt`, {
+      method: 'POST',
+      headers: { 'content-type': 'audio/webm' },
+      body: Buffer.alloc(2_000, 0x62),
+    });
+    assert.equal(stt.status, 200);
+    assert.equal((await stt.json()).text, 'the exact words in the sample');
+    const transcribe = stub.seen.find((s) => s.url === '/transcribe');
+    assert.ok(transcribe.body.includes('name="audio"') && transcribe.body.includes('name="file"'));
+
+    // cloning: sample is auto-transcribed, profile created, sample attached
+    const callsBefore = stub.seen.length;
+    const clone = await fetch(`${srv.base}/api/tts/voices/clone?name=Jax+Clone&filename=sample.mp3&consent=1&default=1`, {
+      method: 'POST',
+      headers: { 'content-type': 'audio/mpeg' },
+      body: Buffer.alloc(20_000, 0x61),
+    });
+    assert.equal(clone.status, 200);
+    const payload = await clone.json();
+    assert.equal(payload.voice_id, 'prof-9');
+    assert.equal(payload.pin, 'JAX_LOCAL_VOICE_ID=prof-9');
+    assert.equal(payload.selected, 'prof-9');
+    const cloneCalls = stub.seen.slice(callsBefore).map((s) => `${s.method} ${s.url}`);
+    assert.deepEqual(cloneCalls, ['POST /transcribe', 'POST /profiles', 'POST /profiles/prof-9/samples']);
+    assert.ok(stub.seen.at(-1).body.includes('reference_text'), 'transcript rides the sample upload');
+    assert.ok(stub.seen.at(-1).body.includes('the exact words in the sample'));
+  } finally {
+    await stopServer(srv);
+    await stub.close();
+  }
+});
+
+test('server: VoiceStudio speaks via OpenAI API and clones via /profiles', async () => {
+  const stub = await startStubEleven((req, res) => {
+    if (req.url === '/v1/audio/speech') {
+      res.writeHead(200, { 'content-type': 'audio/mpeg' });
+      return res.end('VSMP3BYTES');
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (req.url === '/v1/audio/voices') {
+      return res.end(JSON.stringify({ voices: [{ id: 'vs-1', name: 'Studio Clone', kind: 'clone' }] }));
+    }
+    if (req.url === '/v1/audio/transcriptions') return res.end(JSON.stringify({ text: 'transcribed by whisper' }));
+    if (req.url === '/profiles' && req.method === 'POST') return res.end(JSON.stringify({ id: 'vs-9' }));
+    return res.end(JSON.stringify({}));
+  });
+  const srv = await startServer({
+    ELEVENLABS_API_KEY: '',
+    JAX_LOCAL_VOICE_URL: `${stub.url}/v1`, // pasted OpenAI-style base URLs are tolerated
+    JAX_LOCAL_VOICE_KIND: 'voicestudio',
+  });
+  try {
+    const caps = await (await fetch(`${srv.base}/api/capabilities`)).json();
+    assert.equal(caps.voice.provider, 'local');
+    assert.equal(caps.voice.label, 'VoiceStudio (local)');
+    assert.equal(caps.voice.clone, true);
+
+    const tts = await fetch(`${srv.base}/api/tts`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: 'Made on my own hardware.' }),
+    });
+    assert.equal(tts.status, 200);
+    assert.equal(await tts.text(), 'VSMP3BYTES');
+    // with nothing pinned, VoiceStudio gets its 'default' voice
+    assert.equal(JSON.parse(stub.seen.find((s) => s.url === '/v1/audio/speech').body).voice, 'default');
+
+    const voices = await (await fetch(`${srv.base}/api/tts/voices`)).json();
+    assert.equal(voices.voices[0].id, 'vs-1');
+    assert.equal(voices.voices[0].category, 'cloned');
+
+    const stt = await fetch(`${srv.base}/api/stt`, {
+      method: 'POST',
+      headers: { 'content-type': 'audio/webm' },
+      body: Buffer.alloc(2_000, 0x62),
+    });
+    assert.equal((await stt.json()).text, 'transcribed by whisper');
+
+    const clone = await fetch(
+      `${srv.base}/api/tts/voices/clone?name=Studio+Clone&filename=ref.wav&consent=1&transcript=hello+sample+words`,
+      { method: 'POST', headers: { 'content-type': 'audio/wav' }, body: Buffer.alloc(20_000, 0x61) },
+    );
+    assert.equal(clone.status, 200);
+    assert.equal((await clone.json()).voice_id, 'vs-9');
+    const create = stub.seen.find((s) => s.url === '/profiles' && s.method === 'POST');
+    assert.ok(create.body.includes('name="ref_audio"; filename="ref.wav"'), 'sample rides ref_audio');
+    assert.ok(create.body.includes('hello sample words'), 'transcript rides ref_text');
+    assert.ok(create.body.includes('clone'), 'kind=clone is sent');
+  } finally {
+    await stopServer(srv);
+    await stub.close();
+  }
+});
+
+test('server: voice provider precedence is local, then ElevenLabs, unless forced', async () => {
+  const auto = await startServer({
+    ELEVENLABS_API_KEY: 'test-key-not-real',
+    JAX_LOCAL_VOICE_URL: 'http://127.0.0.1:17493',
+  });
+  try {
+    const caps = await (await fetch(`${auto.base}/api/capabilities`)).json();
+    assert.equal(caps.voice.provider, 'local');
+    assert.equal(caps.voice.localKind, 'voicebox', 'port 17493 auto-detects Voicebox');
+  } finally {
+    await stopServer(auto);
+  }
+
+  const forced = await startServer({
+    ELEVENLABS_API_KEY: 'test-key-not-real',
+    JAX_LOCAL_VOICE_URL: 'http://127.0.0.1:3900',
+    JAX_VOICE_PROVIDER: 'elevenlabs',
+  });
+  try {
+    const caps = await (await fetch(`${forced.base}/api/capabilities`)).json();
+    assert.equal(caps.voice.provider, 'elevenlabs');
+  } finally {
+    await stopServer(forced);
+  }
+
+  // a generic OpenAI speech server can speak but offers Jax no clone API
+  const generic = await startServer({ ELEVENLABS_API_KEY: '', JAX_LOCAL_VOICE_URL: 'http://127.0.0.1:8123' });
+  try {
+    const caps = await (await fetch(`${generic.base}/api/capabilities`)).json();
+    assert.equal(caps.voice.provider, 'local');
+    assert.equal(caps.voice.localKind, 'openai');
+    assert.equal(caps.voice.clone, false);
+    const clone = await fetch(`${generic.base}/api/tts/voices/clone?name=X&filename=s.mp3&consent=1`, {
+      method: 'POST',
+      headers: { 'content-type': 'audio/mpeg' },
+      body: Buffer.alloc(20_000, 0x61),
+    });
+    assert.equal(clone.status, 501);
+  } finally {
+    await stopServer(generic);
+  }
+});

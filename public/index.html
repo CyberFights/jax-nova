@@ -266,13 +266,14 @@
       <label>Clone a voice from audio</label>
       <input id="cloneName" type="text" placeholder="Voice name — e.g. Jax (my voice)" maxlength="80" />
       <input id="cloneFile" type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg,.webm,.flac" />
+      <input id="cloneTranscript" type="text" placeholder="Transcript of the sample (optional — local cloning matches better with it)" maxlength="2000" />
       <label class="check-row"><input id="cloneDenoise" type="checkbox" /> Remove background noise from the sample</label>
       <label class="check-row"><input id="cloneDefault" type="checkbox" checked /> Make it Jax&rsquo;s main voice</label>
       <label class="check-row"><input id="cloneConsent" type="checkbox" /> This is my voice, or I have the speaker&rsquo;s permission to clone it</label>
       <div class="drawer-actions">
         <button class="hud-btn" id="btnCloneVoice" type="button">CLONE VOICE</button>
       </div>
-      <small id="cloneHint">Upload 1&ndash;2 minutes of clean, single-speaker audio (MP3 at 192&nbsp;kbps+ is ideal, max 25&nbsp;MB). Needs an ElevenLabs plan with Instant Voice Cloning. The sample is sent to ElevenLabs &mdash; nothing is stored on this server.</small>
+      <small id="cloneHint">Clone free on your own machine with Voicebox or VoiceStudio (set JAX_LOCAL_VOICE_URL), or in the cloud with ElevenLabs. Upload clean, single-speaker audio, max 25&nbsp;MB.</small>
       <small id="cloneStatus" role="status" aria-live="polite"></small>
     </div>
 

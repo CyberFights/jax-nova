@@ -68,7 +68,7 @@ hud.onSpectrum = (arr) => {
 };
 
 const talker = new Talker({
-  elevenlabs: false,
+  server: false,
   onLevel: (v) => {
     reactor.setLevel(v);
     hud.setOutput(v);
@@ -107,8 +107,8 @@ const listener = new Listener({
     hud.log('wake word detected', 'wake');
     setState('listening');
     flashReactor();
-    if (app.caps?.voice?.elevenlabs) {
-      /* ElevenLabs mode still uses browser recognition for the wake word only */
+    if (app.caps?.voice?.server) {
+      /* server-voice mode still uses browser recognition for the wake word only */
     }
     window.__lastWake = at;
   },
@@ -547,16 +547,17 @@ async function loadCapabilities() {
     app.locked = false;
     app.caps = data;
   } catch {
-    app.caps = { brain: { provider: 'offline' }, voice: { elevenlabs: false }, wakeWord: 'hey jax', skills: [] };
+    app.caps = { brain: { provider: 'offline' }, voice: { provider: 'browser', server: false }, wakeWord: 'hey jax', skills: [] };
   }
-  talker.elevenlabs = Boolean(app.caps.voice?.elevenlabs);
+  talker.server = Boolean(app.caps.voice?.server);
+  talker.engineName = app.caps.voice?.label || 'server';
   talker.voiceId = app.caps.voice?.voiceId || null;
   hud.setChips(app.caps);
   $('#brandTag').textContent = `MK VII · ${(app.caps.brain?.provider || 'local').toUpperCase()} CORE`;
   $('#sysReport').textContent = [
     `core        ${app.caps.brain?.provider} · ${app.caps.brain?.model}`,
-    `voice out   ${app.caps.voice?.elevenlabs ? `elevenlabs · ${app.caps.voice.model}` : 'browser synthesis'}`,
-    `voice in    ${app.caps.voice?.elevenlabs ? `scribe · ${app.caps.voice.sttModel}` : 'browser recognition'}`,
+    `voice out   ${app.caps.voice?.server ? `${app.caps.voice.label} · ${app.caps.voice.model}` : 'browser synthesis'}`,
+    `voice in    ${app.caps.voice?.stt ? `${app.caps.voice.sttLabel} · ${app.caps.voice.sttModel}` : 'browser recognition'}`,
     `skills      ${(app.caps.skills || []).length} registered`,
     `location    ${app.caps.location}`,
     `wake word   “${app.caps.wakeWord}”`,
@@ -584,38 +585,52 @@ async function populateVoices() {
     select.append(group);
   };
 
-  let elVoices = [];
-  if (app.caps?.voice?.elevenlabs) {
+  const voice = app.caps?.voice || {};
+  let serverVoices = [];
+  let serverLoaded = false;
+  if (voice.server) {
     try {
       const res = await fetch('/api/tts/voices');
       const data = await res.json();
-      elVoices = (data.voices || []).map((v) => ({
-        label: `${v.name}${v.category === 'cloned' || v.category === 'professional' ? ' · clone' : ''}${v.labels?.accent ? ` · ${v.labels.accent}` : ''}`,
+      serverVoices = (data.voices || []).map((v) => ({
+        label: `${v.name}${v.category === 'cloned' || v.category === 'professional' ? ' · clone' : v.category === 'preset' ? ' · preset' : ''}${v.labels?.accent ? ` · ${v.labels.accent}` : ''}`,
         value: `el:${v.id}`,
       }));
       app.elDefaultVoice = data.selected;
+      serverLoaded = res.ok;
     } catch {
-      /* ignore */
+      /* ignore — server voice app may simply be closed */
     }
   }
   const browserVoices = (window.speechSynthesis?.getVoices() || [])
     .filter((v) => /^en/i.test(v.lang))
     .map((v) => ({ label: `${v.name}${v.default ? ' (default)' : ''}`, value: `local:${v.name}` }));
 
-  addGroup('ElevenLabs', elVoices);
+  addGroup(voice.label || 'Server', serverVoices);
   addGroup('Browser', browserVoices);
-  if (!elVoices.length && !browserVoices.length) {
+  if (!serverVoices.length && !browserVoices.length) {
     const opt = document.createElement('option');
     opt.value = 'local:';
     opt.textContent = 'System default voice';
     select.append(opt);
   }
 
-  const current = app.caps?.voice?.elevenlabs ? `el:${app.elDefaultVoice}` : `local:${localStorage.getItem('jax.voiceName') || talker.browserVoice?.name || ''}`;
-  select.value = current;
-  $('#voiceHint').textContent = app.caps?.voice?.elevenlabs
-    ? 'ElevenLabs is active — speech synthesis and Scribe transcription are proxied through the local server.'
-    : 'Browser voices active. Add ELEVENLABS_API_KEY to .env for a much more natural voice.';
+  if (voice.server) {
+    // a voiceId remembered from another provider (e.g. an ElevenLabs id after
+    // switching to local) must not be sent upstream — fall back to the default
+    const storedId = store.get('voiceId', null);
+    const validStored =
+      storedId && serverVoices.some((v) => v.value === `el:${storedId}`) ? storedId : null;
+    if (serverLoaded && serverVoices.length) talker.voiceId = validStored || app.elDefaultVoice || null;
+    select.value = `el:${validStored || app.elDefaultVoice || talker.voiceId || ''}`;
+  } else {
+    select.value = `local:${localStorage.getItem('jax.voiceName') || talker.browserVoice?.name || ''}`;
+  }
+  $('#voiceHint').textContent = voice.local
+    ? `${voice.label} is active — speech is synthesized on your own machine, free. Keep the voice app running; the first reply may take a while as its model loads.`
+    : voice.server
+      ? 'ElevenLabs is active — speech synthesis and Scribe transcription are proxied through the local server.'
+      : 'Browser voices active. For a free local voice run Voicebox or VoiceStudio and set JAX_LOCAL_VOICE_URL — or add ELEVENLABS_API_KEY for the cloud voice.';
   updateCloneAvailability();
 }
 
@@ -626,14 +641,19 @@ function updateCloneAvailability() {
   const hint = $('#cloneHint');
   if (!btn || !hint) return;
   const voice = app.caps?.voice || {};
-  if (!voice.elevenlabs) {
+  if (!voice.server) {
     btn.disabled = true;
     hint.textContent =
-      'Voice cloning needs ELEVENLABS_API_KEY in .env, on a plan with Instant Voice Cloning (Starter or above). Browser voices cannot be cloned.';
+      'Free cloning: run Voicebox or VoiceStudio on this machine and set JAX_LOCAL_VOICE_URL in .env (see README). Or ELEVENLABS_API_KEY for cloud cloning. Browser voices cannot be cloned.';
   } else if (voice.clone === false) {
     btn.disabled = true;
+    hint.textContent = voice.local
+      ? 'Cloning from Jax is unavailable for this local server (disabled, or a generic speech server with no clone API). Create the voice in Voicebox/VoiceStudio, then pick it above.'
+      : 'Voice cloning is disabled on this deployment (JAX_VOICE_CLONE=false). Voices already cloned on the account can still be picked above.';
+  } else if (voice.local) {
+    btn.disabled = false;
     hint.textContent =
-      'Voice cloning is disabled on this deployment (JAX_VOICE_CLONE=false). Voices already cloned on the account can still be picked above.';
+      `Clones for free on your own machine via ${voice.label}: upload a clean clip (3–30 seconds is ideal for local engines; longer is fine). The transcript field improves the match — for Voicebox Jax transcribes it for you if left blank. The sample stays on your machine.`;
   } else {
     btn.disabled = false;
     hint.textContent =
@@ -650,7 +670,11 @@ async function cloneVoiceFromSample() {
   };
   const file = $('#cloneFile')?.files?.[0];
   if (!file) {
-    setStatus('Pick an audio file first — 1–2 minutes of clear speech works best.');
+    setStatus(
+      app.caps?.voice?.local
+        ? 'Pick an audio file first — a clean clip of a few seconds is enough for local engines.'
+        : 'Pick an audio file first — 1–2 minutes of clear speech works best.',
+    );
     hud.toast('Choose an audio sample to clone', 'warn');
     return;
   }
@@ -673,6 +697,8 @@ async function cloneVoiceFromSample() {
     filename: file.name,
     consent: '1',
     remove_background_noise: $('#cloneDenoise')?.checked ? '1' : '0',
+    // local zero-shot engines clone from audio + transcript (ElevenLabs ignores it)
+    transcript: $('#cloneTranscript')?.value.trim() || '',
     default: makeDefault ? '1' : '0',
   });
 
@@ -699,7 +725,7 @@ async function cloneVoiceFromSample() {
     }
     if (makeDefault) {
       talker.voiceId = data.voice_id;
-      talker.elevenlabs = true;
+      talker.server = true;
       store.set('voiceId', data.voice_id);
       const select = $('#setVoice');
       if (select) select.value = `el:${data.voice_id}`;
@@ -928,9 +954,11 @@ function bindControls() {
     const value = e.target.value;
     if (value.startsWith('el:')) {
       talker.voiceId = value.slice(3);
-      talker.elevenlabs = true;
+      talker.server = true;
       store.set('voiceId', talker.voiceId);
     } else if (value.startsWith('local:')) {
+      // explicitly picking a browser voice leaves server-voice mode
+      talker.server = false;
       talker.setVoiceName(value.slice(6));
     }
     talker.chime('wake');
@@ -1095,7 +1123,7 @@ function handleSlash(cmd) {
 async function manualListen() {
   if (!app.awake) return wake();
   if (!listener.supported) {
-    if (app.caps?.voice?.elevenlabs) return pushToTalk();
+    if (app.caps?.voice?.stt) return pushToTalk();
     hud.toast('Speech recognition unavailable — type instead', 'warn');
     return;
   }

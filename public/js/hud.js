@@ -171,12 +171,13 @@ export class Hud {
     const brain = caps?.brain || {};
     const voice = caps?.voice || {};
     chip('#chipBrain', Boolean(brain.provider), brain.provider || 'core', `Language core: ${brain.provider} (${brain.model})`);
-    chip('#chipVoice', Boolean(voice.elevenlabs), voice.elevenlabs ? 'elevenlabs' : 'browser', voice.elevenlabs ? `ElevenLabs ${voice.model}` : 'Browser speech synthesis', !voice.elevenlabs);
+    const voiceName = voice.localKind || voice.provider || 'browser';
+    chip('#chipVoice', Boolean(voice.server), voice.server ? voiceName : 'browser', voice.server ? `${voice.label} ${voice.model || ''}`.trim() : 'Browser speech synthesis', !voice.server);
     chip('#chipMic', true, 'mic', 'Microphone', true);
     chip('#chipNet', navigator.onLine, navigator.onLine ? 'net' : 'offline', 'Network');
     if (caps?.user) this.setOperator(caps.user, !caps.userIsDefault);
-    $('#ttsEngine').textContent = voice.elevenlabs ? 'ELEVENLABS' : 'BROWSER';
-    $('#dockStatus').textContent = `${brain.provider} core · ${voice.elevenlabs ? 'elevenlabs' : 'browser'} voice`;
+    $('#ttsEngine').textContent = voice.server ? (voice.label || 'SERVER').toUpperCase() : 'BROWSER';
+    $('#dockStatus').textContent = `${brain.provider} core · ${voice.server ? voiceName : 'browser'} voice`;
   }
 
   /** Who the current Wrestle-ai memory belongs to. */
@@ -562,8 +563,8 @@ export class Hud {
     const card = this.baseCard('System diagnostics', 'nominal', 'good');
     const rows = [
       ['CORE', `${caps?.brain?.provider || '—'} · ${caps?.brain?.model || '—'}`],
-      ['VOICE OUT', caps?.voice?.elevenlabs ? `elevenlabs ${caps.voice.model}` : 'browser synthesis'],
-      ['VOICE IN', caps?.voice?.elevenlabs ? `scribe ${caps.voice.sttModel}` : 'browser recognition'],
+      ['VOICE OUT', caps?.voice?.server ? `${caps.voice.label} · ${caps.voice.model}` : 'browser synthesis'],
+      ['VOICE IN', caps?.voice?.stt ? `${caps.voice.sttLabel} · ${caps.voice.sttModel}` : 'browser recognition'],
       ['SKILLS', `${(caps?.skills || []).length} registered`],
       ['UPTIME', `${Math.round(performance.now() / 1000)}s session`],
       ['LATENCY', `${this.latencyHistory.at(-1) || 0} ms last response`],
@@ -761,7 +762,7 @@ export class Hud {
         items: [
           'Brain: Claude → local CLI → keyless',
           'Bridge: Wrestle-ai /wrestling_chat',
-          'Voice: ElevenLabs → browser',
+          'Voice: local (Voicebox/VoiceStudio) → ElevenLabs → browser',
           'Search: DuckDuckGo → Bing → Wikipedia',
           'Images: FLUX → Pollinations → local',
         ],
